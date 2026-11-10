@@ -483,6 +483,15 @@ impl ClientShellState {
     ) {
         use crossterm::event::KeyModifiers;
 
+        let esc_key;
+        let key = if super::input::is_ctrl_bracket_key(key) {
+            esc_key = crate::input::TerminalKey::new(KeyCode::Esc, KeyModifiers::NONE)
+                .with_kind(key.kind);
+            &esc_key
+        } else {
+            key
+        };
+
         if matches!(self.overlay, Some(ClientShellOverlay::Onboarding)) {
             if matches!(
                 key.code,

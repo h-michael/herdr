@@ -14,12 +14,13 @@ fn is_retained_selection_copy_key(key: &crate::input::TerminalKey) -> bool {
 ///
 /// A legacy terminal sends Ctrl+[ as 0x1b, the same byte as Esc, so it already
 /// arrives as `KeyCode::Esc`. Under the kitty keyboard protocol the modified key
-/// is reported on its own and reaches navigate mode as `Char('[')` with CONTROL.
+/// is reported on its own and reaches the shell as `Char('[')` with CONTROL.
 /// Ctrl+Shift+[ stays distinct because it carries SHIFT.
 ///
 /// Navigate mode checks this only after keybinding dispatch, so a configured
-/// Ctrl+[ binding keeps working and this stays a fallback cancel.
-fn is_ctrl_bracket_key(key: &crate::input::TerminalKey) -> bool {
+/// Ctrl+[ binding keeps working and this stays a fallback cancel. Overlays do
+/// not dispatch keybindings, so they treat it as Esc unconditionally.
+pub(super) fn is_ctrl_bracket_key(key: &crate::input::TerminalKey) -> bool {
     key.code == KeyCode::Char('[') && key.modifiers == KeyModifiers::CONTROL
 }
 
