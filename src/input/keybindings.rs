@@ -90,6 +90,15 @@ pub(crate) fn resolve_prefix_binding(
     })
 }
 
+/// Prefix binding lookup without the generated-character fallback, for keys
+/// whose modifiers must match the binding exactly.
+pub(crate) fn resolve_exact_prefix_binding(
+    keybinds: &Keybinds,
+    key: &TerminalKey,
+) -> Option<KeybindMatch> {
+    resolve_exact_binding(keybinds, key, KeybindDispatch::Prefix)
+}
+
 pub(crate) fn resolve_non_indexed_action(
     keybinds: &Keybinds,
     key: &TerminalKey,

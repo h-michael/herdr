@@ -276,6 +276,18 @@ pub(super) enum ClientShellMode {
     Copy,
 }
 
+/// Prefix mode entered with a modified prefix chord (e.g. `ctrl+s`) whose
+/// modifiers the user may still be holding. While they stay held, prefix
+/// bindings keep running without pressing the prefix again; letting go ends
+/// prefix mode so later keys reach the pane.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct ClientPrefixHold {
+    pub(super) modifiers: crossterm::event::KeyModifiers,
+    /// A binding already ran under this hold. Before that, releasing the
+    /// modifiers keeps the classic one-shot prefix (`ctrl+s`, release, `c`).
+    pub(super) repeated: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ClientShellOverlayKind {
     Onboarding,
@@ -917,6 +929,8 @@ pub(crate) struct ClientShellState {
     /// The focused pane asks for every key as an escape code, so Herdr pushed
     /// report-all to the host; plain text input then reaches it as text.
     pub(super) host_reports_all_keys: bool,
+    /// Only meaningful while `mode` is `Prefix`; every prefix entry resets it.
+    pub(super) prefix_hold: Option<ClientPrefixHold>,
     pub(super) replaying_url_click: bool,
     pub(super) selection: Option<crate::selection::Selection<String>>,
     pub(super) last_pane_click: Option<ClientPaneClick>,
@@ -1085,6 +1099,7 @@ impl ClientShellState {
             host_reports_key_releases: false,
             host_erase_is_ctrl_h: false,
             host_reports_all_keys: false,
+            prefix_hold: None,
             replaying_url_click: false,
             selection: None,
             last_pane_click: None,
