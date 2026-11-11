@@ -715,6 +715,8 @@ impl ClientShellState {
                 self.focused_pane_id().map(ClientInputTarget::Pane)
             }
             ClientShellMode::Prefix => {
+                use crate::input::PrefixResolution;
+
                 let return_mode = if self.copy_mode.as_ref().is_some_and(|copy_mode| {
                     self.focused_pane_id().as_deref() == Some(copy_mode.pane_id.as_str())
                 }) {
@@ -722,51 +724,80 @@ impl ClientShellState {
                 } else {
                     ClientShellMode::Terminal
                 };
+                outcome.repaint = true;
                 if self.config.keybinds.matches_prefix(key) {
                     self.prefix_hold = None;
                     self.mode = return_mode;
-                    outcome.repaint = true;
+                    // Mid-sequence the keys so far were meant for Herdr, so the
+                    // prefix cancels instead of sending a literal prefix.
+                    if !self.pending_prefix_keys.is_empty() {
+                        return None;
+                    }
                     return self.focused_pane_id().map(ClientInputTarget::Pane);
                 }
                 if key.code == KeyCode::Esc {
                     self.prefix_hold = None;
                     self.mode = return_mode;
-                    outcome.repaint = true;
                     return None;
                 }
                 // While the modifiers are held, bindings match exactly. The
                 // generated-character fallback drops modifiers, so holding
                 // Alt after an Alt prefix and typing a character Option
                 // generates (Option+W is `∑` on macOS) could run `prefix+∑`.
-                let binding = if self.prefix_hold.is_some() {
-                    crate::input::resolve_exact_prefix_binding(&self.config.keybinds.keybinds, key)
+                let matching = if self.prefix_hold.is_some() {
+                    crate::input::PrefixKeyMatching::Exact
                 } else {
-                    crate::input::resolve_prefix_binding(&self.config.keybinds.keybinds, key)
+                    crate::input::PrefixKeyMatching::WithGeneratedFallback
                 };
-                if let Some(binding) = binding {
-                    let hold = self.prefix_hold.take();
-                    self.mode = return_mode;
-                    outcome.repaint = true;
-                    self.record_binding(binding, outcome);
-                    // A binding that switched mode, opened an overlay or popup,
-                    // or detached owns the next keys, so it ends the hold.
-                    let binding_kept_input = self.mode == return_mode
-                        && self.overlay.is_none()
-                        && !self.popup_pending
-                        && self.popup_terminal_id.is_none()
-                        && !outcome.detach;
-                    if let Some(hold) = hold.filter(|_| binding_kept_input) {
-                        self.mode = ClientShellMode::Prefix;
-                        self.prefix_hold = Some(ClientPrefixHold {
-                            repeated: true,
-                            ..hold
-                        });
+                match crate::input::resolve_prefix_key(
+                    &self.config.keybinds.keybinds,
+                    &self.pending_prefix_keys,
+                    key,
+                    matching,
+                ) {
+                    PrefixResolution::Matched(binding) => {
+                        if self.prefix_navigation_target.is_some() {
+                            // Started in navigate mode: run it as a single-key
+                            // navigate binding runs, against the selected
+                            // workspace instead of the focused one. The
+                            // selection can go stale between steps, so it is
+                            // checked again here.
+                            self.mode = ClientShellMode::Navigate;
+                            self.navigate_workspace_id = self.prefix_navigation_target.take();
+                            if self.workspace_preview_action_blocked() {
+                                self.reject_blocked_navigate_action(outcome);
+                            } else {
+                                self.record_navigate_binding(binding, false, outcome);
+                            }
+                            return None;
+                        }
+                        let hold = self.prefix_hold.take();
+                        self.mode = return_mode;
+                        self.record_binding(binding, outcome);
+                        // A binding that switched mode, opened an overlay or popup,
+                        // or detached owns the next keys, so it ends the hold.
+                        let binding_kept_input = self.mode == return_mode
+                            && self.overlay.is_none()
+                            && !self.popup_pending
+                            && self.popup_terminal_id.is_none()
+                            && !outcome.detach;
+                        if let Some(hold) = hold.filter(|_| binding_kept_input) {
+                            self.mode = ClientShellMode::Prefix;
+                            // A completed sequence starts over, so the held
+                            // modifiers can repeat it like a single key.
+                            self.pending_prefix_keys.clear();
+                            self.prefix_hold = Some(ClientPrefixHold {
+                                repeated: true,
+                                ..hold
+                            });
+                        }
                     }
-                    return None;
+                    PrefixResolution::Pending(step) => self.pending_prefix_keys.push(step),
+                    PrefixResolution::NoMatch => {
+                        self.prefix_hold = None;
+                        self.mode = return_mode;
+                    }
                 }
-                self.prefix_hold = None;
-                self.mode = return_mode;
-                outcome.repaint = true;
                 None
             }
             ClientShellMode::Navigate => {
@@ -796,7 +827,7 @@ impl ClientShellState {
     }
 
     fn enter_prefix_mode(&mut self, prefix: crate::config::KeyCombo) {
-        self.mode = ClientShellMode::Prefix;
+        self.enter_prefix_mode_without_hold();
         // Shift is left out because it selects the key itself (`h` vs `H`);
         // requiring it held would block unshifted bindings. Without key
         // release reports there is no way to tell held from released, so the
@@ -846,6 +877,15 @@ impl ClientShellState {
             self.mode = self.copy_or_terminal_mode();
             outcome.repaint = true;
         }
+    }
+
+    /// Prefix mode with no pending sequence keys and no modifier hold, for
+    /// entries that did not come from pressing a prefix chord.
+    fn enter_prefix_mode_without_hold(&mut self) {
+        self.mode = ClientShellMode::Prefix;
+        self.pending_prefix_keys.clear();
+        self.prefix_hold = None;
+        self.prefix_navigation_target = None;
     }
 
     pub(super) fn copy_or_terminal_mode(&self) -> ClientShellMode {
@@ -908,13 +948,7 @@ impl ClientShellState {
                 self.cancel_navigate(outcome);
                 return;
             }
-            self.push_endpoint_notice(
-                ClientEndpointNoticeKind::Rejected,
-                "navigate_endpoint_inactive",
-                "Confirm workspace first",
-                "Select an available workspace and press Enter before using workspace or pane actions",
-            );
-            outcome.repaint = true;
+            self.reject_blocked_navigate_action(outcome);
             return;
         }
 
@@ -1026,20 +1060,43 @@ impl ClientShellState {
                 KeybindDispatch::Prefix,
             )
             .map(KeybindMatch::Command)
-        })
-        .or_else(|| {
-            crate::input::resolve_indexed_action(
-                &self.config.keybinds.keybinds,
-                key,
-                KeybindDispatch::Prefix,
-            )
-            .map(KeybindMatch::Action)
         });
         if let Some(binding) = binding {
             self.record_navigate_binding(binding, false, outcome);
+            return;
+        }
+        // Navigate mode runs prefix bindings by one key, so a sequence moves
+        // to prefix mode with its first key pressed. Left here, its later keys
+        // would run unrelated single-key bindings.
+        if let Some(step) =
+            crate::input::resolve_prefix_sequence_start(&self.config.keybinds.keybinds, key)
+        {
+            let target = self.navigate_workspace_id.take();
+            self.enter_prefix_mode_without_hold();
+            self.prefix_navigation_target = target;
+            self.pending_prefix_keys.push(step);
+            outcome.repaint = true;
+            return;
+        }
+        if let Some(action) = crate::input::resolve_indexed_action(
+            &self.config.keybinds.keybinds,
+            key,
+            KeybindDispatch::Prefix,
+        ) {
+            self.record_navigate_binding(KeybindMatch::Action(action), false, outcome);
         } else if is_ctrl_bracket_key(key) {
             self.cancel_navigate(outcome);
         }
+    }
+
+    fn reject_blocked_navigate_action(&mut self, outcome: &mut ClientShellInput) {
+        self.push_endpoint_notice(
+            ClientEndpointNoticeKind::Rejected,
+            "navigate_endpoint_inactive",
+            "Confirm workspace first",
+            "Select an available workspace and press Enter before using workspace or pane actions",
+        );
+        outcome.repaint = true;
     }
 
     fn cancel_navigate(&mut self, outcome: &mut ClientShellInput) {
@@ -1182,6 +1239,11 @@ impl ClientShellState {
     fn input_context(&self) -> ClientInputContext {
         ClientInputContext {
             mode: self.mode,
+            pending_prefix_keys: if self.mode == ClientShellMode::Prefix {
+                self.pending_prefix_keys.len()
+            } else {
+                0
+            },
             overlay: self.overlay.as_ref().map(ClientShellOverlay::kind),
             popup_terminal_id: self.popup_input_target().and_then(|target| match target {
                 ClientInputTarget::Popup(terminal_id) => Some(terminal_id),

@@ -103,6 +103,17 @@ Every binding is configurable, including the prefix itself:
 prefix = "ctrl+a"
 ```
 
+Bindings can also be key sequences, similar to tmux key tables. This groups creation commands behind `prefix+n`:
+
+```toml
+[keys]
+new_tab = "prefix+n w"
+split_vertical = "prefix+n minus"
+split_horizontal = "prefix+n |"
+```
+
+See [Key sequences](/docs/configuration/#key-sequences) for the rules.
+
 ## Going prefix-free
 
 You can bind Herdr actions to direct chords that need no prefix at all. The hard part is knowing which chords are safe, because terminals, shells, and desktop environments already own most of the keyboard.

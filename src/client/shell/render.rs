@@ -32,6 +32,7 @@ pub(super) fn render_mode_bar(
     buffer: &mut Buffer,
     pane_area: Rect,
     mode: ClientShellMode,
+    pending_prefix_keys: &[crate::config::KeyCombo],
     copy_mode: Option<&ClientCopyModeState>,
     endpoint_error: Option<&str>,
     update_available: bool,
@@ -83,6 +84,16 @@ pub(super) fn render_mode_bar(
         ]);
     } else {
         match mode {
+            ClientShellMode::Prefix if !pending_prefix_keys.is_empty() => {
+                segments.extend([
+                    (" PREFIX ".to_owned(), mode_style),
+                    (" ".to_owned(), base),
+                    (crate::config::format_key_sequence(pending_prefix_keys), key),
+                    ("  ".to_owned(), base),
+                    ("esc".to_owned(), key),
+                    (" cancel".to_owned(), base),
+                ]);
+            }
             ClientShellMode::Prefix => {
                 segments.extend([
                     (" PREFIX ".to_owned(), mode_style),

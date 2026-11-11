@@ -1,6 +1,8 @@
 use crossterm::event::KeyCode;
 
-use crate::config::{CustomCommandKeybind, Keybinds};
+use crate::config::{
+    terminal_key_matches_combo, ActionKeybinds, CustomCommandKeybind, KeyCombo, Keybinds,
+};
 
 use super::TerminalKey;
 
@@ -79,24 +81,110 @@ pub(crate) fn resolve_direct_binding(
     resolve_exact_binding(keybinds, key, KeybindDispatch::Direct)
 }
 
-pub(crate) fn resolve_prefix_binding(
-    keybinds: &Keybinds,
-    key: &TerminalKey,
-) -> Option<KeybindMatch> {
-    resolve_exact_binding(keybinds, key, KeybindDispatch::Prefix).or_else(|| {
-        generated_character_key(key).and_then(|generated_key| {
-            resolve_exact_binding(keybinds, &generated_key, KeybindDispatch::Prefix)
-        })
-    })
+/// Outcome of one key press while prefix mode is active.
+#[derive(Debug, Clone)]
+pub(crate) enum PrefixResolution {
+    Matched(KeybindMatch),
+    /// The key continues at least one key sequence; carries the normalized
+    /// step to append to the pending keys.
+    Pending(KeyCombo),
+    NoMatch,
 }
 
-/// Prefix binding lookup without the generated-character fallback, for keys
-/// whose modifiers must match the binding exactly.
-pub(crate) fn resolve_exact_prefix_binding(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PrefixKeyMatching {
+    /// Also try the character the key generated, without its modifiers.
+    WithGeneratedFallback,
+    /// Match the key and its modifiers only.
+    Exact,
+}
+
+/// Resolve a key pressed in prefix mode after `pending`, the normalized keys
+/// already accepted for an unfinished key sequence. Config validation keeps
+/// a complete binding from also being the start of a longer one, so a match
+/// never has to wait for more keys.
+pub(crate) fn resolve_prefix_key(
+    keybinds: &Keybinds,
+    pending: &[KeyCombo],
+    key: &TerminalKey,
+    matching: PrefixKeyMatching,
+) -> PrefixResolution {
+    let generated_key = match matching {
+        PrefixKeyMatching::WithGeneratedFallback => generated_character_key(key),
+        PrefixKeyMatching::Exact => None,
+    };
+    for candidate in std::iter::once(key).chain(generated_key.as_ref()) {
+        let dispatch = KeybindDispatch::Prefix;
+        if pending.is_empty() {
+            if let Some(binding) = resolve_non_indexed_action(keybinds, candidate, dispatch)
+                .map(KeybindMatch::Action)
+                .or_else(|| {
+                    resolve_custom_command(keybinds, candidate, dispatch).map(KeybindMatch::Command)
+                })
+            {
+                return PrefixResolution::Matched(binding);
+            }
+        }
+        // Sequences are non-indexed actions, so they rank where single-key
+        // actions do: ahead of indexed bindings, whose number matching also
+        // accepts legacy shifted symbols the registry does not see as a conflict.
+        if let Some(resolution) = resolve_sequence_step(keybinds, pending, candidate) {
+            return resolution;
+        }
+        if pending.is_empty() {
+            if let Some(action) = resolve_indexed_action(keybinds, candidate, dispatch) {
+                return PrefixResolution::Matched(KeybindMatch::Action(action));
+            }
+        }
+    }
+    PrefixResolution::NoMatch
+}
+
+/// The normalized first step when `key` starts a prefix key sequence.
+pub(crate) fn resolve_prefix_sequence_start(
     keybinds: &Keybinds,
     key: &TerminalKey,
-) -> Option<KeybindMatch> {
-    resolve_exact_binding(keybinds, key, KeybindDispatch::Prefix)
+) -> Option<KeyCombo> {
+    let generated_key = generated_character_key(key);
+    std::iter::once(key)
+        .chain(generated_key.as_ref())
+        .find_map(
+            |candidate| match resolve_sequence_step(keybinds, &[], candidate) {
+                Some(PrefixResolution::Pending(step)) => Some(step),
+                _ => None,
+            },
+        )
+}
+
+fn resolve_sequence_step(
+    keybinds: &Keybinds,
+    pending: &[KeyCombo],
+    key: &TerminalKey,
+) -> Option<PrefixResolution> {
+    find_non_indexed_action(keybinds, |bindings, action| {
+        bindings.bindings.iter().find_map(|binding| {
+            if !binding.trigger.is_prefix() || binding.rest.is_empty() {
+                return None;
+            }
+            let mut steps = binding.prefix_steps();
+            if !steps
+                .by_ref()
+                .take(pending.len())
+                .eq(pending.iter().copied())
+            {
+                return None;
+            }
+            let next = steps.next()?;
+            if !terminal_key_matches_combo(key, next) {
+                return None;
+            }
+            Some(if steps.next().is_none() {
+                PrefixResolution::Matched(KeybindMatch::Action(action))
+            } else {
+                PrefixResolution::Pending(next)
+            })
+        })
+    })
 }
 
 pub(crate) fn resolve_non_indexed_action(
@@ -104,6 +192,15 @@ pub(crate) fn resolve_non_indexed_action(
     key: &TerminalKey,
     dispatch: KeybindDispatch,
 ) -> Option<KeybindAction> {
+    find_non_indexed_action(keybinds, |bindings, action| {
+        action_matches(bindings, key, dispatch).then_some(action)
+    })
+}
+
+fn find_non_indexed_action<T>(
+    keybinds: &Keybinds,
+    mut find: impl FnMut(&ActionKeybinds, KeybindAction) -> Option<T>,
+) -> Option<T> {
     for (bindings, action) in [
         (&keybinds.help, KeybindAction::Help),
         (&keybinds.settings, KeybindAction::Settings),
@@ -164,8 +261,8 @@ pub(crate) fn resolve_non_indexed_action(
         (&keybinds.detach, KeybindAction::Detach),
         (&keybinds.goto, KeybindAction::OpenNavigator),
     ] {
-        if action_matches(bindings, key, dispatch) {
-            return Some(action);
+        if let Some(found) = find(bindings, action) {
+            return Some(found);
         }
     }
     None
@@ -252,11 +349,7 @@ fn generated_character_key(key: &TerminalKey) -> Option<TerminalKey> {
     ))
 }
 
-fn action_matches(
-    bindings: &crate::config::ActionKeybinds,
-    key: &TerminalKey,
-    dispatch: KeybindDispatch,
-) -> bool {
+fn action_matches(bindings: &ActionKeybinds, key: &TerminalKey, dispatch: KeybindDispatch) -> bool {
     match dispatch {
         KeybindDispatch::Direct => bindings.matches_direct_key(key),
         KeybindDispatch::Prefix => bindings.matches_prefix_key(key),
@@ -338,6 +431,136 @@ mod tests {
         assert!(matches!(
             resolve_prefix_binding(&keybinds, &key),
             Some(KeybindMatch::Action(KeybindAction::Help))
+        ));
+    }
+
+    fn resolve_prefix_binding(keybinds: &Keybinds, key: &TerminalKey) -> Option<KeybindMatch> {
+        match resolve_prefix_key(keybinds, &[], key, PrefixKeyMatching::WithGeneratedFallback) {
+            PrefixResolution::Matched(binding) => Some(binding),
+            PrefixResolution::Pending(_) | PrefixResolution::NoMatch => None,
+        }
+    }
+
+    fn sequence_keybinds(keys: &str) -> Keybinds {
+        let config: crate::config::Config = toml::from_str(&format!("[keys]\n{keys}")).unwrap();
+        assert!(config.collect_diagnostics().is_empty());
+        config.keybinds()
+    }
+
+    fn plain_key(ch: char) -> TerminalKey {
+        TerminalKey::new(KeyCode::Char(ch), KeyModifiers::empty())
+    }
+
+    #[test]
+    fn prefix_sequence_resolves_one_key_at_a_time() {
+        let keybinds = sequence_keybinds(
+            r#"
+split_vertical = "prefix+n -"
+split_horizontal = "prefix+n c -"
+"#,
+        );
+        let n = (KeyCode::Char('n'), KeyModifiers::empty());
+        let c = (KeyCode::Char('c'), KeyModifiers::empty());
+
+        assert!(matches!(
+            resolve_prefix_key(&keybinds, &[], &plain_key('n'), PrefixKeyMatching::WithGeneratedFallback),
+            PrefixResolution::Pending(step) if step == n
+        ));
+        assert!(matches!(
+            resolve_prefix_key(
+                &keybinds,
+                &[n],
+                &plain_key('-'),
+                PrefixKeyMatching::WithGeneratedFallback
+            ),
+            PrefixResolution::Matched(KeybindMatch::Action(KeybindAction::SplitVertical))
+        ));
+        assert!(matches!(
+            resolve_prefix_key(&keybinds, &[n], &plain_key('c'), PrefixKeyMatching::WithGeneratedFallback),
+            PrefixResolution::Pending(step) if step == c
+        ));
+        assert!(matches!(
+            resolve_prefix_key(
+                &keybinds,
+                &[n, c],
+                &plain_key('-'),
+                PrefixKeyMatching::WithGeneratedFallback
+            ),
+            PrefixResolution::Matched(KeybindMatch::Action(KeybindAction::SplitHorizontal))
+        ));
+        assert!(matches!(
+            resolve_prefix_key(
+                &keybinds,
+                &[n],
+                &plain_key('x'),
+                PrefixKeyMatching::WithGeneratedFallback
+            ),
+            PrefixResolution::NoMatch
+        ));
+    }
+
+    #[test]
+    fn single_key_prefix_bindings_only_resolve_without_pending_keys() {
+        let keybinds = sequence_keybinds(r#"split_vertical = "prefix+n -""#);
+        let n = (KeyCode::Char('n'), KeyModifiers::empty());
+
+        // `prefix+c` is the default new_tab; after `n` it is not a binding.
+        assert!(matches!(
+            resolve_prefix_key(
+                &keybinds,
+                &[],
+                &plain_key('c'),
+                PrefixKeyMatching::WithGeneratedFallback
+            ),
+            PrefixResolution::Matched(KeybindMatch::Action(KeybindAction::NewTab))
+        ));
+        assert!(matches!(
+            resolve_prefix_key(
+                &keybinds,
+                &[n],
+                &plain_key('c'),
+                PrefixKeyMatching::WithGeneratedFallback
+            ),
+            PrefixResolution::NoMatch
+        ));
+    }
+
+    #[test]
+    fn later_sequence_steps_use_the_generated_character_fallback() {
+        let keybinds = sequence_keybinds(r#"help = "prefix+n ?""#);
+        let n = (KeyCode::Char('n'), KeyModifiers::empty());
+        let key = TerminalKey::new(KeyCode::Char('/'), KeyModifiers::SHIFT)
+            .with_generated_text(Some("?".to_owned()));
+
+        assert!(matches!(
+            resolve_prefix_key(
+                &keybinds,
+                &[n],
+                &key,
+                PrefixKeyMatching::WithGeneratedFallback
+            ),
+            PrefixResolution::Matched(KeybindMatch::Action(KeybindAction::Help))
+        ));
+    }
+
+    #[test]
+    fn sequence_start_outranks_indexed_bindings_like_single_key_actions() {
+        // `!` is a legacy shifted 1 for the indexed binding; the registry
+        // sees different combos, so both load.
+        let keybinds = sequence_keybinds(
+            r#"
+switch_tab = "prefix+shift+1..9"
+zoom = "prefix+! z"
+"#,
+        );
+        assert!(matches!(
+            resolve_prefix_key(
+                &keybinds,
+                &[],
+                &plain_key('!'),
+                PrefixKeyMatching::WithGeneratedFallback
+            ),
+            PrefixResolution::Pending(_)
         ));
     }
 }
