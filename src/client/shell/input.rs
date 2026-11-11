@@ -3,11 +3,25 @@ use crate::protocol::ClientPaneInputEvent;
 use crate::raw_input::RawInputEvent;
 use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
 
-const LOCAL_INPUT_SOURCE: u8 = 0;
+pub(super) const LOCAL_INPUT_SOURCE: u8 = 0;
 
 fn is_retained_selection_copy_key(key: &crate::input::TerminalKey) -> bool {
     matches!(key.code, KeyCode::Char('c' | 'C'))
         && matches!(key.modifiers, KeyModifiers::CONTROL | KeyModifiers::SUPER)
+}
+
+fn modifier_key_flag(modifier: crossterm::event::ModifierKeyCode) -> KeyModifiers {
+    use crossterm::event::ModifierKeyCode;
+
+    match modifier {
+        ModifierKeyCode::LeftShift | ModifierKeyCode::RightShift => KeyModifiers::SHIFT,
+        ModifierKeyCode::LeftControl | ModifierKeyCode::RightControl => KeyModifiers::CONTROL,
+        ModifierKeyCode::LeftAlt | ModifierKeyCode::RightAlt => KeyModifiers::ALT,
+        ModifierKeyCode::LeftSuper | ModifierKeyCode::RightSuper => KeyModifiers::SUPER,
+        ModifierKeyCode::LeftHyper | ModifierKeyCode::RightHyper => KeyModifiers::HYPER,
+        ModifierKeyCode::LeftMeta | ModifierKeyCode::RightMeta => KeyModifiers::META,
+        ModifierKeyCode::IsoLevel3Shift | ModifierKeyCode::IsoLevel5Shift => KeyModifiers::empty(),
+    }
 }
 
 /// True for Ctrl+[, the terminal-level equivalent of Esc.
@@ -228,10 +242,22 @@ impl ClientShellState {
         }
         for event in events {
             let event = match event {
-                RawInputEvent::Key(key) => match self.host_text_commit(&key) {
-                    Some(text) => RawInputEvent::Text(crate::input::TextCommit::new(text)),
-                    None => RawInputEvent::Key(key),
-                },
+                RawInputEvent::Key(key) => {
+                    // Before text classification, which depends on the mode a
+                    // released hold leaves behind.
+                    self.end_released_prefix_hold(&key, &mut outcome);
+                    match self.host_text_commit(&key) {
+                        Some(text) => RawInputEvent::Text(crate::input::TextCommit::new(text)),
+                        None => RawInputEvent::Key(key),
+                    }
+                }
+                // Committed text and pastes carry no modifier state. After a
+                // repeat they mean the user moved on; prefix mode would drop
+                // them.
+                event @ (RawInputEvent::Text(_) | RawInputEvent::Paste(_)) => {
+                    self.end_prefix_hold(&mut outcome);
+                    event
+                }
                 other => other,
             };
             if self.handle_machine_badge_event(&event, &mut outcome) {
@@ -327,6 +353,9 @@ impl ClientShellState {
                 RawInputEvent::OuterFocusLost => {
                     outcome.repaint |= self.clear_link_hover();
                     self.outer_focused = Some(false);
+                    // The modifiers are usually let go in another window,
+                    // where Herdr never sees the release.
+                    self.end_prefix_hold(&mut outcome);
                     self.release_input_leases(&mut outcome);
                     outcome
                         .requests
@@ -381,6 +410,7 @@ impl ClientShellState {
         outcome: &mut ClientShellInput,
     ) {
         outcome.repaint |= self.clear_link_hover();
+        self.end_released_prefix_hold(&key, outcome);
         if self.copy_operation_in_flight {
             self.copy_input_queue.push_back(key);
             return;
@@ -676,8 +706,8 @@ impl ClientShellState {
                     self.record_binding(binding, outcome);
                     return None;
                 }
-                if self.config.keybinds.matches_prefix(key) {
-                    self.mode = ClientShellMode::Prefix;
+                if let Some(prefix) = self.config.keybinds.matching_prefix(key) {
+                    self.enter_prefix_mode(prefix);
                     outcome.repaint = true;
                     return None;
                 }
@@ -692,23 +722,48 @@ impl ClientShellState {
                     ClientShellMode::Terminal
                 };
                 if self.config.keybinds.matches_prefix(key) {
+                    self.prefix_hold = None;
                     self.mode = return_mode;
                     outcome.repaint = true;
                     return self.focused_pane_id().map(ClientInputTarget::Pane);
                 }
                 if key.code == KeyCode::Esc {
+                    self.prefix_hold = None;
                     self.mode = return_mode;
                     outcome.repaint = true;
                     return None;
                 }
-                if let Some(binding) =
+                // While the modifiers are held, bindings match exactly. The
+                // generated-character fallback drops modifiers, so holding
+                // Alt after an Alt prefix and typing a character Option
+                // generates (Option+W is `∑` on macOS) could run `prefix+∑`.
+                let binding = if self.prefix_hold.is_some() {
+                    crate::input::resolve_exact_prefix_binding(&self.config.keybinds.keybinds, key)
+                } else {
                     crate::input::resolve_prefix_binding(&self.config.keybinds.keybinds, key)
-                {
+                };
+                if let Some(binding) = binding {
+                    let hold = self.prefix_hold.take();
                     self.mode = return_mode;
                     outcome.repaint = true;
                     self.record_binding(binding, outcome);
+                    // A binding that switched mode, opened an overlay or popup,
+                    // or detached owns the next keys, so it ends the hold.
+                    let binding_kept_input = self.mode == return_mode
+                        && self.overlay.is_none()
+                        && !self.popup_pending
+                        && self.popup_terminal_id.is_none()
+                        && !outcome.detach;
+                    if let Some(hold) = hold.filter(|_| binding_kept_input) {
+                        self.mode = ClientShellMode::Prefix;
+                        self.prefix_hold = Some(ClientPrefixHold {
+                            repeated: true,
+                            ..hold
+                        });
+                    }
                     return None;
                 }
+                self.prefix_hold = None;
                 self.mode = return_mode;
                 outcome.repaint = true;
                 None
@@ -722,19 +777,73 @@ impl ClientShellState {
                 None
             }
             ClientShellMode::Copy => {
-                if self
+                let prefix = self
                     .copy_mode
                     .as_ref()
                     .is_none_or(|copy_mode| copy_mode.search_prompt.is_none())
-                    && self.config.keybinds.matches_prefix(key)
-                {
-                    self.mode = ClientShellMode::Prefix;
+                    .then(|| self.config.keybinds.matching_prefix(key))
+                    .flatten();
+                if let Some(prefix) = prefix {
+                    self.enter_prefix_mode(prefix);
                     outcome.repaint = true;
                 } else {
                     self.route_copy_mode_key(key, outcome);
                 }
                 None
             }
+        }
+    }
+
+    fn enter_prefix_mode(&mut self, prefix: crate::config::KeyCombo) {
+        self.mode = ClientShellMode::Prefix;
+        // Shift is left out because it selects the key itself (`h` vs `H`);
+        // requiring it held would block unshifted bindings. Without key
+        // release reports there is no way to tell held from released, so the
+        // prefix stays one-shot.
+        let modifiers = prefix.1.difference(KeyModifiers::SHIFT);
+        self.prefix_hold =
+            (self.host_reports_key_releases && !modifiers.is_empty()).then_some(ClientPrefixHold {
+                modifiers,
+                repeated: false,
+            });
+    }
+
+    /// Ends a prefix hold once a key event shows its modifiers were let go:
+    /// a release report for one of them, or any other key event without them
+    /// (the host ignores report-all, or the release raced the mode switch).
+    /// The event itself continues through normal handling.
+    fn end_released_prefix_hold(
+        &mut self,
+        key: &crate::input::TerminalKey,
+        outcome: &mut ClientShellInput,
+    ) {
+        if self.mode != ClientShellMode::Prefix {
+            return;
+        }
+        let Some(hold) = self.prefix_hold else {
+            return;
+        };
+        let released = match key.code {
+            KeyCode::Modifier(modifier) => {
+                key.kind == KeyEventKind::Release
+                    && hold.modifiers.intersects(modifier_key_flag(modifier))
+            }
+            _ => !key.modifiers.contains(hold.modifiers),
+        };
+        if released {
+            self.end_prefix_hold(outcome);
+        }
+    }
+
+    /// After a repeat, ending the hold leaves prefix mode. Before any binding
+    /// ran under it, prefix mode stays as the classic one-shot prefix.
+    fn end_prefix_hold(&mut self, outcome: &mut ClientShellInput) {
+        let Some(hold) = self.prefix_hold.take() else {
+            return;
+        };
+        if hold.repeated && self.mode == ClientShellMode::Prefix {
+            self.mode = self.copy_or_terminal_mode();
+            outcome.repaint = true;
         }
     }
 

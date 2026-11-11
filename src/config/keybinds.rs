@@ -24,9 +24,15 @@ pub struct LiveKeybindConfig {
 impl LiveKeybindConfig {
     /// Whether `key` is one of the configured prefix keys.
     pub fn matches_prefix(&self, key: &TerminalKey) -> bool {
+        self.matching_prefix(key).is_some()
+    }
+
+    /// The configured prefix combo that `key` matches, if any.
+    pub fn matching_prefix(&self, key: &TerminalKey) -> Option<KeyCombo> {
         self.prefix
             .iter()
-            .any(|combo| terminal_key_matches_combo(key, *combo))
+            .copied()
+            .find(|combo| terminal_key_matches_combo(key, *combo))
     }
 
     /// Primary prefix combo, used for the compact status bar.
