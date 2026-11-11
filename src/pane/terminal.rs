@@ -5775,17 +5775,27 @@ mod tests {
 
         let backend = ratatui::backend::TestBackend::new(20, 1);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
-        terminal
+        let completed = terminal
             .draw(|frame| pane.render(frame, Rect::new(0, 0, 20, 1), false))
             .unwrap();
-        let buffer = terminal.backend().buffer();
+        let rendered = completed.buffer;
 
-        assert_eq!(buffer[(0, 0)].symbol(), "ｶ\u{ff9e}");
         assert_eq!(
-            buffer[(1, 0)].symbol(),
+            rendered[(1, 0)].symbol(),
             "",
-            "wide spacer tail must stay empty so the host terminal does not overwrite the voiced kana"
+            "wide spacer tail must stay empty in the rendered frame"
         );
+        let initial = ratatui::buffer::Buffer::empty(rendered.area);
+        assert!(
+            initial
+                .diff(rendered)
+                .iter()
+                .all(|&(x, y, cell)| (x, y) != (1, 0) || cell.symbol().is_empty()),
+            "host terminal must not receive a visible write over the voiced kana tail"
+        );
+
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(0, 0)].symbol(), "ｶ\u{ff9e}");
         assert_eq!(buffer[(2, 0)].symbol(), "Z");
     }
 
