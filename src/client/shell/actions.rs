@@ -730,6 +730,12 @@ impl ClientShellState {
                 origin,
                 session_generation,
             } => {
+                // A reply from before the copy session was reset (exit, re-entry,
+                // or a mouse drag replacing the selection) must not move the cursor,
+                // even if the cursor happens to sit at the request's origin again.
+                if session_generation != self.copy_session_generation {
+                    return (false, Vec::new());
+                }
                 let mut outcome = ClientShellInput::default();
                 let (repaint, continue_queue) = match result {
                     Ok(crate::api::schema::ResponseResult::PaneCopyMotion {
@@ -767,6 +773,9 @@ impl ClientShellState {
                 generation,
                 session_generation,
             } => {
+                if session_generation != self.copy_session_generation {
+                    return (false, Vec::new());
+                }
                 let mut outcome = ClientShellInput::default();
                 let (repaint, continue_queue) = match result {
                     Ok(crate::api::schema::ResponseResult::PaneCopySearch {

@@ -264,6 +264,11 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # or Cmd+C when the host forwards it, copies and clears it.
 # copy_on_select = true
 
+# Enter copy mode when a mouse drag ends, keeping the selection so keys can
+# extend it before `y` copies it. copy_on_select still decides whether the
+# release itself copies.
+# mouse_selection_copy_mode = false
+
 # Host cursor policy: "auto", "native", or "drawn".
 # "auto" draws Herdr's own cursor on native Windows builds and WSL to avoid ConPTY cursor flicker, and uses the native terminal cursor elsewhere.
 # "native" always uses the outer terminal cursor. "drawn" always draws Herdr's cursor as terminal cell content.

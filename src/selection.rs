@@ -188,6 +188,11 @@ impl<P> Selection<P> {
         self.ordered()
     }
 
+    /// Anchor and cursor in gesture order, unlike `ordered_cells`.
+    pub(crate) fn endpoints(&self) -> ((u32, u16), (u32, u16)) {
+        (self.anchor, self.cursor)
+    }
+
     pub(crate) fn visible_rects(&self, inner: Rect, metrics: Option<ScrollMetrics>) -> [Rect; 3] {
         let mut rects = [Rect::default(); 3];
         if !self.is_visible() || inner.is_empty() {

@@ -1763,11 +1763,16 @@ impl ClientShellState {
                 .is_some_and(crate::selection::Selection::finish);
             if copied && self.config.copy_on_select {
                 self.request_selection_copy(outcome, true);
-                self.selection = None;
-            } else if self
-                .selection
-                .as_ref()
-                .is_some_and(crate::selection::Selection::is_just_click)
+            }
+            let entered_copy_mode = copied
+                && self.config.mouse_selection_copy_mode
+                && self.enter_copy_mode_from_mouse_selection(outcome);
+            if !entered_copy_mode
+                && ((copied && self.config.copy_on_select)
+                    || self
+                        .selection
+                        .as_ref()
+                        .is_some_and(crate::selection::Selection::is_just_click))
             {
                 self.selection = None;
             }
@@ -2261,6 +2266,12 @@ impl ClientShellState {
                         } else {
                             if mouse.modifiers.is_empty() {
                                 self.last_pane_click = Some(click);
+                            }
+                            if self.config.mouse_selection_copy_mode && self.copy_mode.is_some() {
+                                // A copy reply landing mid-drag would rebuild the selection
+                                // from the old copy-mode range and the release would no
+                                // longer hand the drag over, so drop pending work now.
+                                self.reset_copy_pipeline();
                             }
                             self.selection = Some(crate::selection::Selection::anchor(
                                 hit.pane_id.clone(),
