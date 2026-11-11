@@ -770,6 +770,10 @@ pub(super) enum ClientInputTarget {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct ClientInputContext {
     pub(super) mode: ClientShellMode,
+    /// Part of the context so a press that advances a prefix key sequence
+    /// changes it, and held-key repeats of that press are suppressed instead
+    /// of being resolved again as the next step.
+    pub(super) pending_prefix_keys: usize,
     pub(super) overlay: Option<ClientShellOverlayKind>,
     pub(super) popup_terminal_id: Option<String>,
     pub(super) popup_pending: bool,
@@ -912,6 +916,13 @@ pub(crate) struct ClientShellState {
     pub(super) active_endpoint_id: ClientEndpointId,
     pub(super) collapsed_endpoints: HashSet<ClientEndpointId>,
     pub(super) mode: ClientShellMode,
+    /// Keys of an unfinished prefix key sequence. Cleared whenever prefix
+    /// mode is entered and read only in prefix mode.
+    pub(super) pending_prefix_keys: Vec<crate::config::KeyCombo>,
+    /// Workspace selected in navigate mode when a key sequence moved to
+    /// prefix mode, so the completed binding acts on it as a single-key
+    /// navigate binding would. Cleared whenever prefix mode is entered.
+    pub(super) prefix_navigation_target: Option<WorkspaceNavigationTarget>,
     pub(super) navigate_workspace_id: Option<WorkspaceNavigationTarget>,
     pub(super) pending_workspace_highlight: Option<PendingWorkspaceHighlight>,
     pub(super) reveal_navigation_workspace: bool,
@@ -1088,6 +1099,8 @@ impl ClientShellState {
             active_endpoint_id: ClientEndpointId::Local,
             collapsed_endpoints: HashSet::new(),
             mode: ClientShellMode::Terminal,
+            pending_prefix_keys: Vec::new(),
+            prefix_navigation_target: None,
             navigate_workspace_id: None,
             pending_workspace_highlight: None,
             reveal_navigation_workspace: false,

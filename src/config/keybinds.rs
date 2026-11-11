@@ -189,16 +189,26 @@ impl BindingTrigger {
 pub struct ResolvedBinding {
     pub trigger: BindingTrigger,
     pub label: String,
+    /// Keys after `trigger.combo()` in a prefix key sequence such as
+    /// `prefix+n c s`. Empty for single-key bindings.
+    pub rest: Vec<KeyCombo>,
 }
 
 impl ResolvedBinding {
     #[cfg(test)]
     fn matches_key_event(&self, key: &KeyEvent) -> bool {
-        key_event_matches_combo(key, self.trigger.combo())
+        self.rest.is_empty() && key_event_matches_combo(key, self.trigger.combo())
     }
 
     fn matches_terminal_key(&self, key: &TerminalKey) -> bool {
-        terminal_key_matches_combo(key, self.trigger.combo())
+        self.rest.is_empty() && terminal_key_matches_combo(key, self.trigger.combo())
+    }
+
+    /// Every key of a prefix binding after the prefix itself, normalized.
+    pub fn prefix_steps(&self) -> impl Iterator<Item = KeyCombo> + '_ {
+        std::iter::once(self.trigger.combo())
+            .chain(self.rest.iter().copied())
+            .map(normalize_key_combo)
     }
 }
 
@@ -439,7 +449,9 @@ struct BindingRegistry {
     prefix_combos: Vec<KeyCombo>,
     prefix_source: BindingSource,
     direct: std::collections::HashMap<KeyCombo, RegisteredBinding>,
-    prefix: std::collections::HashMap<KeyCombo, RegisteredBinding>,
+    /// Normalized post-prefix key sequences. A list rather than a map because
+    /// a conflict is any pair where one sequence starts with the other.
+    prefix: Vec<(Vec<KeyCombo>, RegisteredBinding)>,
 }
 
 impl BindingRegistry {
@@ -451,7 +463,7 @@ impl BindingRegistry {
             prefix_combos: normalized,
             prefix_source,
             direct: std::collections::HashMap::new(),
-            prefix: std::collections::HashMap::new(),
+            prefix: Vec::new(),
         }
     }
 
@@ -481,7 +493,15 @@ impl BindingRegistry {
     fn conflict(&self, binding: &ResolvedBinding) -> Option<&RegisteredBinding> {
         match binding.trigger {
             BindingTrigger::Direct(combo) => self.direct.get(&normalize_key_combo(combo)),
-            BindingTrigger::Prefix(combo) => self.prefix.get(&normalize_key_combo(combo)),
+            BindingTrigger::Prefix(_) => {
+                let steps: Vec<KeyCombo> = binding.prefix_steps().collect();
+                self.prefix
+                    .iter()
+                    .find(|(registered, _)| {
+                        registered.starts_with(&steps) || steps.starts_with(registered)
+                    })
+                    .map(|(_, registered)| registered)
+            }
         }
     }
 
@@ -494,8 +514,10 @@ impl BindingRegistry {
             BindingTrigger::Direct(combo) => {
                 self.direct.insert(normalize_key_combo(combo), registered());
             }
-            BindingTrigger::Prefix(combo) => {
-                self.prefix.insert(normalize_key_combo(combo), registered());
+            // Callers check `conflict` first, so no equal sequence is registered yet.
+            BindingTrigger::Prefix(_) => {
+                self.prefix
+                    .push((binding.prefix_steps().collect(), registered()));
             }
         }
     }
@@ -613,6 +635,7 @@ impl Config {
                         &mut registry,
                         &mut diagnostics,
                         $source,
+                        SequenceSupport::Allowed,
                     );
                 }
             };
@@ -821,12 +844,16 @@ fn append_custom_command_bindings(
             continue;
         }
 
+        // Endpoint clients match custom commands by binding label, and older
+        // clients reject labels they cannot parse, so sequences are not
+        // accepted here.
         let bindings = parse_action_bindings(
             &key_field,
             &command.key,
             registry,
             diagnostics,
             BindingSource::User,
+            SequenceSupport::Rejected,
         );
         if bindings.bindings.is_empty() {
             continue;
@@ -863,12 +890,36 @@ fn append_custom_command_bindings(
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SequenceSupport {
+    Allowed,
+    Rejected,
+}
+
+fn reject_unsupported_sequence(
+    field: &str,
+    binding: &ResolvedBinding,
+    diagnostics: &mut Vec<String>,
+) -> bool {
+    if binding.rest.is_empty() {
+        return false;
+    }
+    let diag = format!(
+        "key sequence is not supported here: {field} = {:?}; disabling binding",
+        binding.label
+    );
+    warn!(message = %diag, "config diagnostic");
+    diagnostics.push(diag);
+    true
+}
+
 fn parse_action_bindings(
     field: &str,
     config: &BindingConfig,
     registry: &mut BindingRegistry,
     diagnostics: &mut Vec<String>,
     source: BindingSource,
+    sequences: SequenceSupport,
 ) -> ActionKeybinds {
     let mut bindings = Vec::new();
     for raw in config.values() {
@@ -878,6 +929,11 @@ fn parse_action_bindings(
         }
         match parse_binding_string(raw) {
             Some(ParsedBinding::Single(binding)) => {
+                if sequences == SequenceSupport::Rejected
+                    && reject_unsupported_sequence(field, &binding, diagnostics)
+                {
+                    continue;
+                }
                 if reject_binding(field, &binding, registry, diagnostics, source) {
                     continue;
                 }
@@ -914,7 +970,9 @@ fn parse_navigate_bindings(
         }
         match parse_binding_string(raw) {
             Some(ParsedBinding::Single(binding)) => {
-                if reject_navigate_binding(field, &binding, registry, diagnostics, source) {
+                if reject_unsupported_sequence(field, &binding, diagnostics)
+                    || reject_navigate_binding(field, &binding, registry, diagnostics, source)
+                {
                     continue;
                 }
                 registry.register(&binding, field, source);
@@ -982,6 +1040,9 @@ fn push_indexed_binding(
     source: BindingSource,
     bindings: &mut Vec<IndexedKeybind>,
 ) {
+    if reject_unsupported_sequence(field, &binding, diagnostics) {
+        return;
+    }
     if !matches!(binding.trigger.combo().0, KeyCode::Char('1'..='9')) {
         let diag = format!(
             "indexed keybinding must use 1..9: {field} = {:?}; disabling binding",
@@ -1029,6 +1090,7 @@ fn append_legacy_indexed_bindings(
         let binding = ResolvedBinding {
             trigger: BindingTrigger::Direct(combo),
             label: format!("{}+{idx}", configured_label.trim()),
+            rest: Vec::new(),
         };
         if reject_binding(field, &binding, registry, diagnostics, source) {
             continue;
@@ -1089,6 +1151,43 @@ fn reject_binding(
     diagnostics: &mut Vec<String>,
     source: BindingSource,
 ) -> bool {
+    if binding.trigger.is_direct() && !binding.rest.is_empty() {
+        let diag = format!(
+            "key sequence must start with prefix: {field} = {:?}; disabling binding",
+            binding.label
+        );
+        warn!(message = %diag, "config diagnostic");
+        diagnostics.push(diag);
+        return true;
+    }
+
+    if binding
+        .rest
+        .iter()
+        .any(|combo| registry.prefix_rhs_is_reserved(*combo))
+    {
+        let diag = format!(
+            "reserved keybinding: {field} = {:?} uses keys.prefix inside a key sequence, where it cancels the sequence; disabling binding",
+            binding.label
+        );
+        warn!(message = %diag, "config diagnostic");
+        diagnostics.push(diag);
+        return true;
+    }
+
+    // Prefix mode handles Esc as cancel before resolving bindings, so such a
+    // step can never be pressed, yet it would still displace defaults. Every
+    // step counts, including the first one after the prefix.
+    if !binding.rest.is_empty() && binding.prefix_steps().any(|combo| combo.0 == KeyCode::Esc) {
+        let diag = format!(
+            "unreachable keybinding: {field} = {:?} uses esc inside a key sequence, where it cancels the sequence; disabling binding",
+            binding.label
+        );
+        warn!(message = %diag, "config diagnostic");
+        diagnostics.push(diag);
+        return true;
+    }
+
     if binding.trigger.is_prefix() && registry.prefix_rhs_is_reserved(binding.trigger.combo()) {
         if source == BindingSource::Default && registry.prefix_source == BindingSource::User {
             return true;
@@ -1127,13 +1226,73 @@ fn reject_binding(
     false
 }
 
+/// Split a binding string into key-sequence steps on whitespace. Whitespace
+/// next to `+` stays inside one chord so `ctrl + a` keeps meaning `ctrl+a`.
+fn split_binding_steps(raw: &str) -> Vec<String> {
+    let mut steps: Vec<String> = Vec::new();
+    for token in raw.split_whitespace() {
+        match steps.last_mut() {
+            Some(last) if last.ends_with('+') || token.starts_with('+') => last.push_str(token),
+            _ => steps.push(token.to_owned()),
+        }
+    }
+    steps
+}
+
+/// Label for one step of a key sequence. A bare `+` key would merge with
+/// the neighbouring step when the label is parsed again, so it is spelled
+/// `plus`.
+fn format_sequence_step(combo: KeyCombo) -> String {
+    let label = format_key_combo(combo);
+    if combo.0 == KeyCode::Char('+') {
+        if let Some(modifiers) = label.strip_suffix('+') {
+            return format!("{modifiers}plus");
+        }
+    }
+    label
+}
+
+/// Space-separated label for the post-prefix steps of a key sequence, in
+/// the form `parse_binding_string` accepts back.
+pub fn format_key_sequence(steps: &[KeyCombo]) -> String {
+    steps
+        .iter()
+        .map(|step| format_sequence_step(*step))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn parse_binding_string(raw: &str) -> Option<ParsedBinding> {
-    let trimmed = raw.trim();
-    let (trigger_prefix, body) = if let Some(rest) = trimmed.strip_prefix("prefix+") {
+    let steps = split_binding_steps(raw);
+    let (first, rest) = steps.split_first()?;
+    let (trigger_prefix, body) = if let Some(rest) = first.strip_prefix("prefix+") {
         (true, rest)
     } else {
-        (false, trimmed)
+        (false, first.as_str())
     };
+
+    if !rest.is_empty() {
+        let combo = parse_key_combo(body)?;
+        let rest = rest
+            .iter()
+            .map(|step| parse_key_combo(step))
+            .collect::<Option<Vec<_>>>()?;
+        let steps: Vec<KeyCombo> = std::iter::once(combo).chain(rest.iter().copied()).collect();
+        let label = format!(
+            "{}{}",
+            if trigger_prefix { "prefix+" } else { "" },
+            format_key_sequence(&steps)
+        );
+        return Some(ParsedBinding::Single(ResolvedBinding {
+            trigger: if trigger_prefix {
+                BindingTrigger::Prefix(combo)
+            } else {
+                BindingTrigger::Direct(combo)
+            },
+            label,
+            rest,
+        }));
+    }
 
     if let Some(range_modifiers) = parse_range_modifiers(body) {
         let bindings = (1..=9)
@@ -1154,6 +1313,7 @@ fn parse_binding_string(raw: &str) -> Option<ParsedBinding> {
                     } else {
                         key_label
                     },
+                    rest: Vec::new(),
                 }
             })
             .collect();
@@ -1173,6 +1333,7 @@ fn parse_binding_string(raw: &str) -> Option<ParsedBinding> {
             BindingTrigger::Direct(combo)
         },
         label,
+        rest: Vec::new(),
     }))
 }
 
@@ -2579,5 +2740,204 @@ width = "80%"
             .collect_diagnostics()
             .iter()
             .any(|diag| diag.contains("popup size on non-popup custom command")));
+    }
+
+    fn sequence_config(keys: &str) -> Config {
+        toml::from_str(&format!("[keys]\n{keys}")).unwrap()
+    }
+
+    fn prefix_steps(binding: &ResolvedBinding) -> Vec<KeyCombo> {
+        assert!(binding.trigger.is_prefix(), "{}", binding.label);
+        binding.prefix_steps().collect()
+    }
+
+    fn plain(ch: char) -> KeyCombo {
+        (KeyCode::Char(ch), KeyModifiers::empty())
+    }
+
+    #[test]
+    fn prefix_sequence_parses_each_whitespace_separated_step() {
+        let config = sequence_config(r#"split_vertical = "prefix+n c  s""#);
+        assert!(config.collect_diagnostics().is_empty());
+        let keybinds = config.keybinds();
+        let [binding] = keybinds.split_vertical.bindings.as_slice() else {
+            panic!("expected one binding");
+        };
+        assert_eq!(prefix_steps(binding), [plain('n'), plain('c'), plain('s')]);
+        assert_eq!(binding.label, "prefix+n c s");
+        assert_eq!(
+            keybinds.split_vertical.prefix_rhs_label().as_deref(),
+            Some("n c s")
+        );
+    }
+
+    #[test]
+    fn whitespace_next_to_plus_stays_inside_one_chord() {
+        for raw in ["ctrl + alt ++", "ctrl+ alt+plus", "prefix + ctrl + a"] {
+            match parse_binding_string(raw) {
+                Some(ParsedBinding::Single(binding)) => {
+                    assert!(binding.rest.is_empty(), "{raw}");
+                }
+                _ => panic!("{raw} should parse as one chord"),
+            }
+        }
+        // A lone `+` step joins its neighbour and becomes invalid; `plus` is the step form.
+        assert!(parse_binding_string("prefix+n +").is_none());
+    }
+
+    #[test]
+    fn space_and_plus_are_written_by_name_inside_sequences() {
+        let config = sequence_config(r#"zoom = "prefix+n space ctrl+plus plus""#);
+        assert!(config.collect_diagnostics().is_empty());
+        let keybinds = config.keybinds();
+        let [binding] = keybinds.zoom.bindings.as_slice() else {
+            panic!("expected one binding");
+        };
+        assert_eq!(
+            prefix_steps(binding),
+            [
+                plain('n'),
+                plain(' '),
+                (KeyCode::Char('+'), KeyModifiers::CONTROL),
+                plain('+'),
+            ]
+        );
+        assert_eq!(binding.label, "prefix+n space ctrl+plus plus");
+        match parse_binding_string(&binding.label) {
+            Some(ParsedBinding::Single(reparsed)) => assert_eq!(&reparsed, binding),
+            _ => panic!("label should round-trip"),
+        }
+    }
+
+    #[test]
+    fn sequences_do_not_match_as_single_prefix_keys() {
+        let keybinds = sequence_config(r#"split_vertical = "prefix+n -""#).keybinds();
+        assert!(!keybinds
+            .split_vertical
+            .matches_prefix_key(&TerminalKey::new(KeyCode::Char('n'), KeyModifiers::empty())));
+    }
+
+    #[test]
+    fn user_sequence_displaces_the_default_binding_on_its_first_key() {
+        let config = sequence_config(r#"split_vertical = "prefix+n -""#);
+        assert!(config.collect_diagnostics().is_empty());
+        let keybinds = config.keybinds();
+        assert!(keybinds.next_tab.bindings.is_empty());
+        assert_eq!(keybinds.split_vertical.bindings.len(), 1);
+    }
+
+    #[test]
+    fn user_sequences_that_overlap_keep_the_first_registration() {
+        let config = sequence_config(
+            r#"
+new_tab = "prefix+n"
+split_vertical = "prefix+n -"
+"#,
+        );
+        let keybinds = config.keybinds();
+        assert_eq!(keybinds.new_tab.labels(), ["prefix+n"]);
+        assert!(keybinds.split_vertical.bindings.is_empty());
+        assert!(config.collect_diagnostics().iter().any(|diag| {
+            diag.contains("prefix+n -")
+                && diag.contains("kept keys.new_tab")
+                && diag.contains("disabled keys.split_vertical")
+        }));
+
+        let config = sequence_config(
+            r#"
+split_vertical = "prefix+n -"
+split_horizontal = "prefix+n -"
+"#,
+        );
+        let keybinds = config.keybinds();
+        assert_eq!(
+            keybinds.split_vertical.bindings.len() + keybinds.split_horizontal.bindings.len(),
+            1
+        );
+        assert!(config
+            .collect_diagnostics()
+            .iter()
+            .any(|diag| diag.contains("prefix+n -: kept keys.split_")));
+    }
+
+    #[test]
+    fn sibling_sequences_share_a_first_key_without_conflict() {
+        let config = sequence_config(
+            r#"
+split_vertical = "prefix+n -"
+split_horizontal = "prefix+n c -"
+new_tab = "prefix+n c w"
+"#,
+        );
+        assert!(config.collect_diagnostics().is_empty());
+        let keybinds = config.keybinds();
+        assert_eq!(keybinds.split_vertical.bindings.len(), 1);
+        assert_eq!(keybinds.split_horizontal.bindings.len(), 1);
+        assert_eq!(keybinds.new_tab.bindings.len(), 1);
+
+        // The example in docs/next configuration.mdx and keyboard.mdx.
+        let config = sequence_config(
+            r#"
+new_tab = "prefix+n w"
+split_vertical = "prefix+n minus"
+split_horizontal = "prefix+n |"
+"#,
+        );
+        assert!(config.collect_diagnostics().is_empty());
+        let keybinds = config.keybinds();
+        assert_eq!(keybinds.new_tab.labels(), ["prefix+n w"]);
+        assert_eq!(keybinds.split_vertical.labels(), ["prefix+n -"]);
+        assert_eq!(keybinds.split_horizontal.labels(), ["prefix+n |"]);
+        assert!(keybinds.next_tab.bindings.is_empty());
+    }
+
+    #[test]
+    fn unsupported_sequences_are_disabled_with_diagnostics() {
+        let config: Config = toml::from_str(
+            r#"
+[keys]
+prefix = "ctrl+b"
+zoom = "ctrl+alt+n c"
+close_pane = "prefix+n ctrl+b"
+close_tab = "prefix+n esc"
+help = "prefix+esc x"
+switch_tab = "prefix+n 1"
+navigate_workspace_up = "ctrl+k k"
+
+[[keys.command]]
+key = "prefix+n g"
+command = "lazygit"
+"#,
+        )
+        .unwrap();
+        let keybinds = config.keybinds();
+        let diagnostics = config.collect_diagnostics();
+
+        assert!(keybinds.zoom.bindings.is_empty());
+        assert!(keybinds.close_pane.bindings.is_empty());
+        assert!(keybinds.close_tab.bindings.is_empty());
+        assert!(keybinds.help.bindings.is_empty());
+        assert!(keybinds.switch_tab.is_empty());
+        assert!(keybinds.navigate.workspace_up.bindings.is_empty());
+        assert!(keybinds.custom_commands.is_empty());
+        for (field, reason) in [
+            ("keys.zoom", "key sequence must start with prefix"),
+            ("keys.close_pane", "reserved keybinding"),
+            ("keys.close_tab", "unreachable keybinding"),
+            ("keys.help", "unreachable keybinding"),
+            ("keys.switch_tab", "key sequence is not supported"),
+            (
+                "keys.navigate_workspace_up",
+                "key sequence is not supported",
+            ),
+            ("keys.command[0].key", "key sequence is not supported"),
+        ] {
+            assert!(
+                diagnostics
+                    .iter()
+                    .any(|diag| diag.contains(field) && diag.contains(reason)),
+                "{field}: {diagnostics:?}"
+            );
+        }
     }
 }
