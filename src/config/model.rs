@@ -952,6 +952,8 @@ pub struct UiConfig {
     pub mouse_capture: bool,
     /// Copy text selected with the mouse. Default: true.
     pub copy_on_select: bool,
+    /// Enter copy mode with the selection retained when a mouse drag ends. Default: false.
+    pub mouse_selection_copy_mode: bool,
     /// Host cursor policy. Default: auto.
     pub host_cursor: HostCursorModeConfig,
     /// Modifier that lets right-click gestures pass through to pane apps. Empty disables it.
@@ -1206,6 +1208,7 @@ impl Default for UiConfig {
             mobile_width_threshold: DEFAULT_MOBILE_WIDTH_THRESHOLD,
             mouse_capture: true,
             copy_on_select: true,
+            mouse_selection_copy_mode: false,
             host_cursor: HostCursorModeConfig::Auto,
             right_click_passthrough_modifier: RightClickPassthroughModifierConfig::default(),
             redraw_on_focus_gained: true,
@@ -1758,6 +1761,19 @@ copy_on_select = false
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert!(!config.ui.copy_on_select);
+    }
+
+    #[test]
+    fn mouse_selection_copy_mode_default_off_and_parse() {
+        let default_config = Config::default();
+        assert!(!default_config.ui.mouse_selection_copy_mode);
+
+        let toml = r#"
+[ui]
+mouse_selection_copy_mode = true
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert!(config.ui.mouse_selection_copy_mode);
     }
 
     #[test]

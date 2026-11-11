@@ -14,11 +14,55 @@ impl ClientShellState {
             Some(pane_id) => pane_id,
             None => return false,
         };
+        self.enter_copy_mode_for(pane_id, None, outcome)
+    }
+
+    /// Hands a finished mouse drag over to copy mode: the drag start becomes the
+    /// selection anchor and the release point becomes the copy cursor.
+    pub(super) fn enter_copy_mode_from_mouse_selection(
+        &mut self,
+        outcome: &mut ClientShellInput,
+    ) -> bool {
+        let Some(selection) = self.selection.as_ref() else {
+            return false;
+        };
+        let pane_id = selection.pane_id.clone();
+        let (anchor, cursor) = selection.endpoints();
+        // Target the selection's pane, not the focused one: the focus request sent
+        // on mouse down may not be reflected in the snapshot yet.
+        self.enter_copy_mode_for(
+            pane_id,
+            Some((
+                crate::api::schema::PaneTextPoint {
+                    row: anchor.0,
+                    col: anchor.1,
+                },
+                crate::api::schema::PaneTextPoint {
+                    row: cursor.0,
+                    col: cursor.1,
+                },
+            )),
+            outcome,
+        )
+    }
+
+    fn enter_copy_mode_for(
+        &mut self,
+        pane_id: String,
+        mouse_range: Option<(
+            crate::api::schema::PaneTextPoint,
+            crate::api::schema::PaneTextPoint,
+        )>,
+        outcome: &mut ClientShellInput,
+    ) -> bool {
         if self
             .copy_mode
             .as_ref()
             .is_some_and(|copy_mode| copy_mode.pane_id == pane_id)
         {
+            if let Some((anchor, cursor)) = mouse_range {
+                self.replace_copy_selection_with_mouse_range(anchor, cursor);
+            }
             self.mode = ClientShellMode::Copy;
             return true;
         }
@@ -41,31 +85,33 @@ impl ClientShellState {
             .max_offset_from_bottom
             .saturating_sub(metrics.offset_from_bottom)
             .min(u32::MAX as usize) as u32;
-        let cursor = self
-            .pane_surface
-            .as_ref()
-            .and_then(|surface| {
-                let pane = surface.panes.iter().find(|pane| pane.pane_id == pane_id)?;
-                let cursor = surface
-                    .frame
-                    .cursor
-                    .as_ref()
-                    .filter(|cursor| cursor.visible)?;
-                let inner = pane.inner_rect;
-                (cursor.x >= inner.x
-                    && cursor.x < inner.x.saturating_add(inner.width)
-                    && cursor.y >= inner.y
-                    && cursor.y < inner.y.saturating_add(inner.height))
-                .then_some(crate::api::schema::PaneTextPoint {
-                    row: viewport_top.saturating_add(u32::from(cursor.y - inner.y)),
-                    col: cursor.x - inner.x,
+        let default_cursor = || {
+            self.pane_surface
+                .as_ref()
+                .and_then(|surface| {
+                    let pane = surface.panes.iter().find(|pane| pane.pane_id == pane_id)?;
+                    let cursor = surface
+                        .frame
+                        .cursor
+                        .as_ref()
+                        .filter(|cursor| cursor.visible)?;
+                    let inner = pane.inner_rect;
+                    (cursor.x >= inner.x
+                        && cursor.x < inner.x.saturating_add(inner.width)
+                        && cursor.y >= inner.y
+                        && cursor.y < inner.y.saturating_add(inner.height))
+                    .then_some(crate::api::schema::PaneTextPoint {
+                        row: viewport_top.saturating_add(u32::from(cursor.y - inner.y)),
+                        col: cursor.x - inner.x,
+                    })
                 })
-            })
-            .unwrap_or(crate::api::schema::PaneTextPoint {
-                row: viewport_top
-                    .saturating_add(u32::from(hit.inner_rect.height.saturating_sub(1))),
-                col: 0,
-            });
+                .unwrap_or(crate::api::schema::PaneTextPoint {
+                    row: viewport_top
+                        .saturating_add(u32::from(hit.inner_rect.height.saturating_sub(1))),
+                    col: 0,
+                })
+        };
+        let cursor = mouse_range.map_or_else(default_cursor, |(_, cursor)| cursor);
         self.selection = None;
         self.stop_selection_autoscroll();
         self.selection_highlight_clear_deadline = None;
@@ -86,7 +132,7 @@ impl ClientShellState {
             offset_from_bottom: metrics.offset_from_bottom,
             max_offset_from_bottom: metrics.max_offset_from_bottom,
             entry_offset_from_bottom: metrics.offset_from_bottom,
-            selection: None,
+            selection: mouse_range.map(|(anchor, _)| ClientCopySelection::Character { anchor }),
             search_prompt: None,
             search_query: String::new(),
             search_direction: None,
@@ -97,8 +143,29 @@ impl ClientShellState {
             search_generation: 0,
             copy_after_search: false,
         });
+        self.sync_copy_selection();
         self.mode = ClientShellMode::Copy;
         true
+    }
+
+    fn replace_copy_selection_with_mouse_range(
+        &mut self,
+        anchor: crate::api::schema::PaneTextPoint,
+        cursor: crate::api::schema::PaneTextPoint,
+    ) {
+        // Motions and keys still queued from before the drag must not run
+        // against the new range.
+        self.reset_copy_pipeline();
+        self.stop_selection_autoscroll();
+        self.selection_highlight_clear_deadline = None;
+        let Some(copy_mode) = self.copy_mode.as_mut() else {
+            return;
+        };
+        copy_mode.cursor = cursor;
+        copy_mode.selection = Some(ClientCopySelection::Character { anchor });
+        copy_mode.search_prompt = None;
+        copy_mode.copy_after_search = false;
+        self.sync_copy_selection();
     }
 
     pub(super) fn route_copy_mode_key(
@@ -674,7 +741,7 @@ impl ClientShellState {
         let Some(selection) = copy_mode.selection else {
             return;
         };
-        self.selection = Some(match selection {
+        let mut selection = match selection {
             ClientCopySelection::Character { anchor } => {
                 crate::selection::Selection::absolute_range(
                     copy_mode.pane_id.clone(),
@@ -692,7 +759,12 @@ impl ClientShellState {
                         .saturating_sub(1),
                 )
             }
-        });
+        };
+        // Keys own a copy-mode selection, not the pointer. Left in the drag
+        // phase, a wheel event would move its rendered end through
+        // scroll_in_progress_selection without updating the copy cursor.
+        selection.finish();
+        self.selection = Some(selection);
     }
 
     fn request_copy_motion(

@@ -918,6 +918,12 @@
           "description": "Automatically copy text selected by mouse drag or double-click. When disabled, Ctrl+C or a host-forwarded Cmd+C copies and clears the retained selection."
         },
         {
+          "key": "ui.mouse_selection_copy_mode",
+          "type": "boolean",
+          "default": "false",
+          "description": "Enter copy mode when a mouse drag ends, keeping the selection with the drag start as its anchor and the release point as the copy cursor, so copy-mode motions adjust the range before y copies it. copy_on_select still decides whether the release itself copies; with both enabled, the release copies and stays in copy mode. Double-click word selection is unchanged."
+        },
+        {
           "key": "ui.host_cursor",
           "type": "enum",
           "default": "auto",
