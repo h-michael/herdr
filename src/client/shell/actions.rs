@@ -169,6 +169,16 @@ impl ClientShellState {
                     }
                     return;
                 }
+                if action == crate::input::KeybindAction::ScrollToBottom {
+                    if let Some(pane_id) = self
+                        .snapshot
+                        .as_deref()
+                        .and_then(|snapshot| snapshot.focused_pane_id.clone())
+                    {
+                        self.push_pane_scroll_offset(pane_id, 0, outcome);
+                    }
+                    return;
+                }
                 if self.handle_endpoint_navigation(action, outcome) {
                     return;
                 }

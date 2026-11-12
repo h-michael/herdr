@@ -55,6 +55,7 @@ pub(crate) enum KeybindAction {
     ClosePane,
     EditScrollback,
     ClearPane,
+    ScrollToBottom,
     CopyMode,
     Zoom,
     EnterResizeMode,
@@ -228,6 +229,7 @@ fn find_non_indexed_action<T>(
         (&keybinds.rename_pane, KeybindAction::RenamePane),
         (&keybinds.edit_scrollback, KeybindAction::EditScrollback),
         (&keybinds.clear_pane, KeybindAction::ClearPane),
+        (&keybinds.scroll_to_bottom, KeybindAction::ScrollToBottom),
         (&keybinds.copy_mode, KeybindAction::CopyMode),
         (&keybinds.focus_pane_left, KeybindAction::FocusPaneLeft),
         (&keybinds.focus_pane_down, KeybindAction::FocusPaneDown),
@@ -361,6 +363,27 @@ mod tests {
     use crossterm::event::{KeyCode, KeyModifiers};
 
     use super::*;
+
+    #[test]
+    fn scroll_to_bottom_is_unbound_by_default_and_configurable() {
+        assert!(crate::config::Config::default()
+            .keybinds()
+            .scroll_to_bottom
+            .bindings
+            .is_empty());
+        let config: crate::config::Config =
+            toml::from_str("[keys]\nscroll_to_bottom = \"prefix+]\"").unwrap();
+        let diagnostics = config.collect_diagnostics();
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let keybinds = config.keybinds();
+        assert!(matches!(
+            resolve_prefix_binding(
+                &keybinds,
+                &TerminalKey::new(KeyCode::Char(']'), KeyModifiers::empty())
+            ),
+            Some(KeybindMatch::Action(KeybindAction::ScrollToBottom))
+        ));
+    }
 
     #[test]
     fn clear_pane_is_unbound_by_default_and_configurable() {
