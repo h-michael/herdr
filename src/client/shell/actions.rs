@@ -226,19 +226,7 @@ impl ClientShellState {
                             .iter()
                             .find(|pane| pane.pane_id == selection.pane_id)?
                             .content_revision;
-                        let (anchor, cursor) = selection.ordered_cells();
-                        Some(crate::api::schema::PaneSelectionReadParams {
-                            pane_id: selection.pane_id.clone(),
-                            anchor: crate::api::schema::PaneTextPoint {
-                                row: anchor.0,
-                                col: anchor.1,
-                            },
-                            cursor: crate::api::schema::PaneTextPoint {
-                                row: cursor.0,
-                                col: cursor.1,
-                            },
-                            content_revision: Some(content_revision),
-                        })
+                        Some(selection_read_params(selection, Some(content_revision)))
                     })
                     .flatten();
                 let params = crate::api::schema::CommandInvokeParams {
@@ -272,31 +260,22 @@ impl ClientShellState {
         let Some(selection) = self.selection.as_ref() else {
             return;
         };
-        let pane_id = selection.pane_id.clone();
         let content_revision = self
             .pane_surface
             .as_ref()
-            .and_then(|surface| surface.panes.iter().find(|pane| pane.pane_id == pane_id))
+            .and_then(|surface| {
+                surface
+                    .panes
+                    .iter()
+                    .find(|pane| pane.pane_id == selection.pane_id)
+            })
             .map(|pane| pane.content_revision)
             // Read an explicit selection atomically from the live terminal. Output
             // between the displayed frame and this request must not reject the copy.
             .filter(|_| !live);
-        let (anchor, cursor) = selection.ordered_cells();
+        let params = selection_read_params(selection, content_revision);
         self.push_endpoint_method_with_kind(
-            crate::api::schema::Method::PaneSelectionRead(
-                crate::api::schema::PaneSelectionReadParams {
-                    pane_id,
-                    anchor: crate::api::schema::PaneTextPoint {
-                        row: anchor.0,
-                        col: anchor.1,
-                    },
-                    cursor: crate::api::schema::PaneTextPoint {
-                        row: cursor.0,
-                        col: cursor.1,
-                    },
-                    content_revision,
-                },
-            ),
+            crate::api::schema::Method::PaneSelectionRead(params),
             PendingEndpointKind::SelectionCopy,
             outcome,
         );
@@ -1124,5 +1103,30 @@ impl ClientShellState {
             })),
             _ => None,
         }
+    }
+}
+
+fn selection_read_params(
+    selection: &crate::selection::Selection<String>,
+    content_revision: Option<u64>,
+) -> crate::api::schema::PaneSelectionReadParams {
+    let rectangle = selection.is_rectangle();
+    let (anchor, cursor) = if rectangle {
+        selection.rectangle_corners()
+    } else {
+        selection.ordered_cells()
+    };
+    crate::api::schema::PaneSelectionReadParams {
+        pane_id: selection.pane_id.clone(),
+        anchor: crate::api::schema::PaneTextPoint {
+            row: anchor.0,
+            col: anchor.1,
+        },
+        cursor: crate::api::schema::PaneTextPoint {
+            row: cursor.0,
+            col: cursor.1,
+        },
+        content_revision,
+        rectangle,
     }
 }

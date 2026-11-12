@@ -3095,9 +3095,31 @@ fn ghostty_extract_selection(
     core: &mut GhosttyPaneCore,
     selection: &crate::selection::Selection,
 ) -> Result<String, crate::ghostty::Error> {
-    let ((start_row, start_col), (end_row, end_col)) = selection.ordered_cells();
-    core.terminal
-        .read_text_screen((start_col, start_row), (end_col, end_row), false)
+    if !selection.is_rectangle() {
+        let ((start_row, start_col), (end_row, end_col)) = selection.ordered_cells();
+        return core
+            .terminal
+            .read_text_screen((start_col, start_row), (end_col, end_row), false);
+    }
+    // A single rectangle read from libghostty joins a soft-wrapped row with
+    // the next one, because read_text_screen unwraps, and joins the rows on
+    // either side of an internal page boundary. Reading each row on its own
+    // keeps one line per row.
+    let ((top, left), (bottom, right)) = selection.rectangle_corners();
+    let mut text = String::new();
+    for row in top..=bottom {
+        if row > top {
+            text.push('\n');
+        }
+        text.push_str(
+            &core
+                .terminal
+                .read_text_screen((left, row), (right, row), true)?,
+        );
+    }
+    // libghostty drops trailing blank rows from a multi-row read.
+    text.truncate(text.trim_end_matches('\n').len());
+    Ok(text)
 }
 
 fn ghostty_screen_row(
@@ -5909,6 +5931,92 @@ mod tests {
             .extract_selection(&selection)
             .expect("selection should extract text");
         assert_eq!(text, "000003\n000004\n000005");
+    }
+
+    fn rectangle_text(bytes: &[u8], anchor: (u32, u16), cursor: (u32, u16)) -> String {
+        let (tx, _rx) = mpsc::channel(4);
+        let mut terminal = crate::ghostty::Terminal::new(12, 4, 1024).unwrap();
+        terminal.write(bytes);
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+        let selection =
+            crate::selection::Selection::absolute_rectangle(PaneId::from_raw(1), anchor, cursor);
+        pane.extract_selection(&selection)
+            .expect("rectangle selection should extract text")
+    }
+
+    #[test]
+    fn extract_rectangle_selection_reads_same_columns_on_each_row() {
+        let bytes = b"abcdefgh\r\n01234567\r\nABCDEFGH";
+        let expected = "cde\n234\nCDE";
+        for (anchor, cursor) in [((0, 2), (2, 4)), ((2, 4), (0, 2)), ((0, 4), (2, 2))] {
+            assert_eq!(
+                rectangle_text(bytes, anchor, cursor),
+                expected,
+                "anchor={anchor:?} cursor={cursor:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn extract_rectangle_selection_trims_trailing_blanks_per_row() {
+        assert_eq!(
+            rectangle_text(b"ab  cd\r\nab\r\nabcdef", (0, 1), (2, 3)),
+            "b\nb\nbcd",
+        );
+    }
+
+    #[test]
+    fn extract_rectangle_selection_keeps_soft_wrapped_rows_apart() {
+        // 24 characters soft-wrap onto a second row of the 12-column pane.
+        assert_eq!(
+            rectangle_text(b"abcdefghijklABCDEFGHIJKL", (0, 2), (1, 4)),
+            "cde\nCDE",
+        );
+    }
+
+    #[test]
+    fn extract_rectangle_selection_keeps_inner_blank_rows_and_drops_trailing_ones() {
+        assert_eq!(rectangle_text(b"ab\r\n\r\nab", (0, 0), (3, 1)), "ab\n\nab");
+    }
+
+    #[test]
+    fn extract_rectangle_selection_keeps_rows_apart_across_pages() {
+        let (tx, _rx) = mpsc::channel(4);
+        let mut terminal = crate::ghostty::Terminal::new(12, 4, 4 * 1024 * 1024).unwrap();
+        let lines = 5000;
+        write_numbered_lines(&mut terminal, lines);
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+        let selection = crate::selection::Selection::absolute_rectangle(
+            PaneId::from_raw(1),
+            (0, 2),
+            (lines as u32 - 1, 5),
+        );
+        let text = pane
+            .extract_selection(&selection)
+            .expect("rectangle selection should extract text");
+        let expected = (0..lines)
+            .map(|i| format!("{i:06}")[2..6].to_owned())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text == expected,
+            "first differing row: {:?}",
+            text.lines().zip(expected.lines()).find(|(a, b)| a != b)
+        );
+    }
+
+    #[test]
+    fn extract_rectangle_selection_with_wide_character_on_edge() {
+        // "a" at col 0, the wide character at cols 1-2, "b" at col 3.
+        let bytes = "a\u{3042}b\r\na\u{3042}b".as_bytes();
+        assert_eq!(
+            rectangle_text(bytes, (0, 2), (1, 3)),
+            "\u{3042}b\n\u{3042}b"
+        );
+        assert_eq!(
+            rectangle_text(bytes, (0, 0), (1, 1)),
+            "a\u{3042}\na\u{3042}"
+        );
     }
 
     #[test]

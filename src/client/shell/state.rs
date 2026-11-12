@@ -825,6 +825,9 @@ pub(super) enum ClientCopySelection {
     Linewise {
         anchor_row: u32,
     },
+    Block {
+        anchor: crate::api::schema::PaneTextPoint,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

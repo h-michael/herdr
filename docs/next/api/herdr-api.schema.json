@@ -3150,6 +3150,10 @@
             },
             "pane_id": {
               "type": "string"
+            },
+            "rectangle": {
+              "description": "Read the block whose opposite corners are `anchor` and `cursor`.",
+              "type": "boolean"
             }
           },
           "required": [

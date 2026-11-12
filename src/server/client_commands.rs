@@ -189,6 +189,44 @@ mod tests {
         }
     }
 
+    /// Optional request fields a client sends only to servers that advertise
+    /// the paired capability. Generation-1 servers never receive them, so they
+    /// are removed before comparing against the frozen shapes.
+    const CAPABILITY_GATED_FIELDS: &[(&str, &str, &str)] = &[(
+        "PaneSelectionReadParams",
+        "rectangle",
+        crate::protocol::endpoint::PANE_SELECTION_RECTANGLE_CAPABILITY,
+    )];
+
+    fn without_capability_gated_fields(
+        name: &str,
+        definition: &serde_json::Value,
+    ) -> serde_json::Value {
+        let mut definition = definition.clone();
+        for (_, field, _) in CAPABILITY_GATED_FIELDS
+            .iter()
+            .filter(|(gated_name, _, _)| *gated_name == name)
+        {
+            let required = definition
+                .get("required")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|required| required.iter().any(|value| value == field));
+            assert!(
+                !required,
+                "capability-gated field {name}.{field} must be optional"
+            );
+            let removed = definition
+                .get_mut("properties")
+                .and_then(serde_json::Value::as_object_mut)
+                .and_then(|properties| properties.remove(*field));
+            assert!(
+                removed.is_some(),
+                "capability-gated field {name}.{field} is missing"
+            );
+        }
+        definition
+    }
+
     fn endpoint_method_shape_digests() -> BTreeMap<String, String> {
         let schema = serde_json::to_value(schemars::schema_for!(crate::api::schema::Request))
             .expect("request schema");
@@ -224,7 +262,8 @@ mod tests {
                     .get(&name)
                     .unwrap_or_else(|| panic!("missing schema definition {name} for {method}"));
                 collect_schema_refs(definition, &mut referenced_names);
-                selected_definitions.insert(name, normalized_wire_schema(definition));
+                let definition = without_capability_gated_fields(&name, definition);
+                selected_definitions.insert(name, normalized_wire_schema(&definition));
             }
             let shape = serde_json::json!({
                 "request": normalized_wire_schema(branch),

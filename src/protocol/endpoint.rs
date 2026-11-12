@@ -31,6 +31,9 @@ pub const AGENT_VIEW_PROJECTION_CAPABILITY: &str = "agent_view_projection";
 pub const AGENT_VIEW_PROJECTION_KIND: &str = "endpoint.agent-view.v1";
 pub const AGENT_COMPLETIONS_CAPABILITY: &str = "agent_completions";
 pub const AGENT_COMPLETIONS_KIND: &str = "endpoint.agent-completions.v1";
+/// `pane.selection.read` honors `rectangle`. Older servers ignore the unknown
+/// field and return stream-ordered text, so clients must check this first.
+pub const PANE_SELECTION_RECTANGLE_CAPABILITY: &str = "pane_selection_rectangle";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EndpointAgentCompletions {
@@ -174,6 +177,7 @@ impl EndpointServerWelcome {
                 HEALTH_CHECK_CAPABILITY.into(),
                 AGENT_VIEW_PROJECTION_CAPABILITY.into(),
                 AGENT_COMPLETIONS_CAPABILITY.into(),
+                PANE_SELECTION_RECTANGLE_CAPABILITY.into(),
             ],
             error: None,
         }
@@ -385,6 +389,7 @@ mod tests {
                 HEALTH_CHECK_CAPABILITY.to_string(),
                 AGENT_VIEW_PROJECTION_CAPABILITY.to_string(),
                 AGENT_COMPLETIONS_CAPABILITY.to_string(),
+                PANE_SELECTION_RECTANGLE_CAPABILITY.to_string(),
             ]
         );
     }

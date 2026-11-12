@@ -263,6 +263,11 @@ impl ClientShellState {
                 self.move_copy_page(1, true, outcome);
                 return;
             }
+            (KeyCode::Char('v'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
+                self.toggle_copy_rectangle();
+                outcome.repaint = true;
+                return;
+            }
             _ => {}
         }
 
@@ -734,6 +739,59 @@ impl ClientShellState {
         }
     }
 
+    fn toggle_copy_rectangle(&mut self) {
+        let supported = self
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.endpoint_id == self.active_endpoint_id)
+            .is_some_and(|endpoint| endpoint.pane_selection_rectangle_supported);
+        if !supported {
+            self.push_endpoint_notice(
+                ClientEndpointNoticeKind::Unsupported,
+                crate::protocol::endpoint::PANE_SELECTION_RECTANGLE_CAPABILITY,
+                "Action unavailable",
+                "This server does not support rectangle selection yet. Update and restart it to enable this action.",
+            );
+            return;
+        }
+        let Some(copy_mode) = self.copy_mode.as_mut() else {
+            return;
+        };
+        let cursor = copy_mode.cursor;
+        let starts_new = copy_mode.selection.is_none();
+        let next = match copy_mode.selection {
+            None => ClientCopySelection::Block { anchor: cursor },
+            Some(ClientCopySelection::Character { anchor }) => {
+                ClientCopySelection::Block { anchor }
+            }
+            Some(ClientCopySelection::Block { anchor }) => {
+                ClientCopySelection::Character { anchor }
+            }
+            Some(ClientCopySelection::Linewise { anchor_row }) => ClientCopySelection::Block {
+                anchor: crate::api::schema::PaneTextPoint {
+                    row: anchor_row,
+                    col: 0,
+                },
+            },
+        };
+        copy_mode.selection = Some(next);
+        let rectangle = matches!(next, ClientCopySelection::Block { .. });
+        let pane_id = copy_mode.pane_id.clone();
+        // Like `v`, a selection whose cursor has not moved yet stays hidden.
+        match self.selection.take() {
+            Some(selection) if selection.is_just_click() => {
+                self.selection = Some(selection.with_rectangle(rectangle));
+            }
+            _ if starts_new => {
+                self.selection = Some(
+                    crate::selection::Selection::absolute_anchor(pane_id, (cursor.row, cursor.col))
+                        .with_rectangle(rectangle),
+                );
+            }
+            _ => self.sync_copy_selection(),
+        }
+    }
+
     pub(super) fn sync_copy_selection(&mut self) {
         let Some(copy_mode) = self.copy_mode.as_ref() else {
             return;
@@ -744,6 +802,13 @@ impl ClientShellState {
         let mut selection = match selection {
             ClientCopySelection::Character { anchor } => {
                 crate::selection::Selection::absolute_range(
+                    copy_mode.pane_id.clone(),
+                    (anchor.row, anchor.col),
+                    (copy_mode.cursor.row, copy_mode.cursor.col),
+                )
+            }
+            ClientCopySelection::Block { anchor } => {
+                crate::selection::Selection::absolute_rectangle(
                     copy_mode.pane_id.clone(),
                     (anchor.row, anchor.col),
                     (copy_mode.cursor.row, copy_mode.cursor.col),
