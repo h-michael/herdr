@@ -76,6 +76,7 @@ impl ClientShellState {
                 col: gesture.end_col,
             },
             content_revision: gesture.content_revision,
+            rectangle: false,
         };
         if !self.push_endpoint_method_with_kind(
             crate::api::schema::Method::PaneSelectionRead(params),

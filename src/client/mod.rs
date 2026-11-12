@@ -516,6 +516,17 @@ async fn run_client_loop(
                     })
                 }),
         );
+        shell.set_endpoint_pane_selection_rectangle_supported(
+            &endpoint::ClientEndpointId::Local,
+            initial
+                .as_ref()
+                .and_then(|(_, handshake)| handshake.endpoint_capabilities.as_ref())
+                .is_some_and(|capabilities| {
+                    capabilities.iter().any(|capability| {
+                        capability == crate::protocol::endpoint::PANE_SELECTION_RECTANGLE_CAPABILITY
+                    })
+                }),
+        );
         if local_unavailable {
             shell.set_endpoint_status(
                 &endpoint::ClientEndpointId::Local,
@@ -1387,11 +1398,18 @@ async fn run_client_loop(
                     let agent_view_projection_supported = negotiation.supports_capability(
                         crate::protocol::endpoint::AGENT_VIEW_PROJECTION_CAPABILITY,
                     );
+                    let pane_selection_rectangle_supported = negotiation.supports_capability(
+                        crate::protocol::endpoint::PANE_SELECTION_RECTANGLE_CAPABILITY,
+                    );
                     let frame = state.shell.as_mut().and_then(|shell| {
                         shell.set_endpoint_methods_for(&endpoint_id, Some(negotiation.methods()));
                         shell.set_endpoint_agent_view_projection_supported(
                             &endpoint_id,
                             agent_view_projection_supported,
+                        );
+                        shell.set_endpoint_pane_selection_rectangle_supported(
+                            &endpoint_id,
+                            pane_selection_rectangle_supported,
                         );
                         shell.compose(state.reported_size.0, state.reported_size.1)
                     });

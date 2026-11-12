@@ -170,10 +170,10 @@ pub(super) fn render_mode_bar(
                     }
                     return Some(bar);
                 } else {
-                    let select = if copy_mode.selection.is_some() {
-                        "selecting"
-                    } else {
-                        "select"
+                    let (label, select) = match copy_mode.selection {
+                        Some(ClientCopySelection::Block { .. }) => (" COPY RECT ", "selecting"),
+                        Some(_) => (" COPY ", "selecting"),
+                        None => (" COPY ", "select"),
                     };
                     let match_status = copy_mode
                         .search_current_global
@@ -187,7 +187,7 @@ pub(super) fn render_mode_bar(
                             ("esc", " clear  q exit")
                         };
                     segments.extend([
-                        (" COPY ".to_owned(), mode_style),
+                        (label.to_owned(), mode_style),
                         (" ".to_owned(), base),
                         ("h/j/k/l w/b/e { }".to_owned(), key),
                         (" move  ".to_owned(), base),
@@ -197,6 +197,8 @@ pub(super) fn render_mode_bar(
                         (format!(" repeat{match_status}  "), base),
                         ("v/space".to_owned(), key),
                         (format!(" {select}  "), base),
+                        ("ctrl+v".to_owned(), key),
+                        (" rect  ".to_owned(), base),
                         ("y/enter".to_owned(), key),
                         (" copy  ".to_owned(), base),
                         (exit_keys.to_owned(), key),

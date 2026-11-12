@@ -281,6 +281,9 @@ pub struct PaneSelectionReadParams {
     pub cursor: PaneTextPoint,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_revision: Option<u64>,
+    /// Read the block whose opposite corners are `anchor` and `cursor`.
+    #[serde(default, skip_serializing_if = "super::is_false")]
+    pub rectangle: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

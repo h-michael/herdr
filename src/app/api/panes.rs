@@ -259,7 +259,8 @@ impl App {
             pane_id,
             (params.anchor.row, params.anchor.col),
             (params.cursor.row, params.cursor.col),
-        );
+        )
+        .with_rectangle(params.rectangle);
         let Some(text) = runtime.extract_selection(&selection) else {
             return Err((
                 "selection_unavailable",
@@ -2573,6 +2574,7 @@ mod tests {
             anchor: crate::api::schema::PaneTextPoint { row: 0, col: 0 },
             cursor: crate::api::schema::PaneTextPoint { row: 0, col: 4 },
             content_revision: Some(revision),
+            rectangle: false,
         };
         assert_eq!(
             app.pane_selection_text(&params).unwrap_err().0,
@@ -2587,6 +2589,41 @@ mod tests {
             ResponseResult::PaneSelection {
                 pane_id: public_pane_id,
                 text: "hello".into(),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn api_pane_selection_read_extracts_rectangle() {
+        let (mut app, public_pane_id) = app_with_test_workspace();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        app.state.insert_test_runtime(
+            pane_id,
+            crate::terminal::TerminalRuntime::test_with_scrollback_bytes(
+                20,
+                5,
+                1000,
+                b"hello world\r\nquick brown",
+            ),
+        );
+
+        let response = app.handle_pane_selection_read(
+            "req".into(),
+            PaneSelectionReadParams {
+                pane_id: public_pane_id.clone(),
+                anchor: crate::api::schema::PaneTextPoint { row: 1, col: 4 },
+                cursor: crate::api::schema::PaneTextPoint { row: 0, col: 2 },
+                content_revision: None,
+                rectangle: true,
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(
+            success.result,
+            ResponseResult::PaneSelection {
+                pane_id: public_pane_id,
+                text: "llo\nick".into(),
             }
         );
     }

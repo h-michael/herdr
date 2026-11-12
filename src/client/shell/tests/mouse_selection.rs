@@ -1499,3 +1499,23 @@ fn motion_reply_during_a_replacement_drag_does_not_cancel_the_handoff() {
     );
     assert_eq!(copy_mode.cursor, point(1, 1));
 }
+
+#[test]
+fn ctrl_v_after_mouse_handoff_turns_the_dragged_range_into_a_rectangle() {
+    let (mut state, inner) = mouse_copy_mode_state(false);
+    state.set_endpoint_pane_selection_rectangle_supported(&ClientEndpointId::Local, true);
+    mouse_drag(&mut state, inner, (2, 1), (0, 0));
+
+    state.handle_input_bytes(b"\x16");
+
+    assert_eq!(
+        state.copy_mode.as_ref().expect("copy mode").selection,
+        Some(ClientCopySelection::Block {
+            anchor: point(1, 2)
+        })
+    );
+    let selection = state.selection.as_ref().expect("selection");
+    assert!(selection.is_rectangle());
+    assert!(selection.is_visible());
+    assert_eq!(selection.rectangle_corners(), ((0, 0), (1, 2)));
+}

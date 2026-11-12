@@ -41,6 +41,9 @@ pub struct Selection<P = PaneId> {
     cursor: (u32, u16),
     /// Selection phase.
     phase: Phase,
+    /// Block selection: the anchor and cursor are opposite corners and every
+    /// row covers the same column range.
+    rectangle: bool,
 }
 
 impl<P> Selection<P> {
@@ -53,6 +56,7 @@ impl<P> Selection<P> {
             anchor,
             cursor: anchor,
             phase: Phase::Anchored,
+            rectangle: false,
         }
     }
 
@@ -62,6 +66,7 @@ impl<P> Selection<P> {
             anchor,
             cursor: anchor,
             phase: Phase::Anchored,
+            rectangle: false,
         }
     }
 
@@ -71,7 +76,21 @@ impl<P> Selection<P> {
             anchor,
             cursor,
             phase: Phase::Dragging,
+            rectangle: false,
         }
+    }
+
+    pub(crate) fn absolute_rectangle(pane_id: P, anchor: (u32, u16), cursor: (u32, u16)) -> Self {
+        Self::absolute_range(pane_id, anchor, cursor).with_rectangle(true)
+    }
+
+    pub(crate) fn with_rectangle(mut self, rectangle: bool) -> Self {
+        self.rectangle = rectangle;
+        self
+    }
+
+    pub(crate) fn is_rectangle(&self) -> bool {
+        self.rectangle
     }
 
     pub(crate) fn line_range(pane_id: P, anchor_row: u32, cursor_row: u32, end_col: u16) -> Self {
@@ -85,6 +104,7 @@ impl<P> Selection<P> {
             anchor: (anchor_row, anchor_col),
             cursor: (cursor_row, cursor_col),
             phase: Phase::Dragging,
+            rectangle: false,
         }
     }
 
@@ -188,6 +208,14 @@ impl<P> Selection<P> {
         self.ordered()
     }
 
+    /// Top-left and bottom-right corners of the block spanned by the anchor
+    /// and cursor, regardless of the gesture direction.
+    pub(crate) fn rectangle_corners(&self) -> ((u32, u16), (u32, u16)) {
+        let (ar, ac) = self.anchor;
+        let (cr, cc) = self.cursor;
+        ((ar.min(cr), ac.min(cc)), (ar.max(cr), ac.max(cc)))
+    }
+
     /// Anchor and cursor in gesture order, unlike `ordered_cells`.
     pub(crate) fn endpoints(&self) -> ((u32, u16), (u32, u16)) {
         (self.anchor, self.cursor)
@@ -198,7 +226,11 @@ impl<P> Selection<P> {
         if !self.is_visible() || inner.is_empty() {
             return rects;
         }
-        let ((start_row, start_col), (end_row, end_col)) = self.ordered();
+        let ((start_row, start_col), (end_row, end_col)) = if self.rectangle {
+            self.rectangle_corners()
+        } else {
+            self.ordered()
+        };
         let top = viewport_top_row(metrics);
         let bottom = top.saturating_add(u32::from(inner.height));
         let rect = |first: u32, end: u32, left: u16, right: u16| {
@@ -217,10 +249,10 @@ impl<P> Selection<P> {
                 )
             }
         };
-        if start_row == end_row {
+        if self.rectangle || start_row == end_row {
             rects[0] = rect(
                 start_row,
-                start_row.saturating_add(1),
+                end_row.saturating_add(1),
                 start_col,
                 end_col.saturating_add(1),
             );
@@ -248,6 +280,10 @@ impl<P> Selection<P> {
             return false;
         }
         let row = absolute_row_for_viewport_row(viewport_row, metrics);
+        if self.rectangle {
+            let ((top, left), (bottom, right)) = self.rectangle_corners();
+            return (top..=bottom).contains(&row) && (left..=right).contains(&col);
+        }
         let ((sr, sc), (er, ec)) = self.ordered();
         if row < sr || row > er {
             return false;
@@ -435,6 +471,83 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn rectangle_contains_only_cells_inside_row_and_column_ranges() {
+        let selection = Selection::absolute_rectangle((), (3, 5), (1, 2));
+        assert!(selection.is_rectangle());
+        for row in 0..6 {
+            for col in 0..8 {
+                assert_eq!(
+                    selection.contains(row, col, None),
+                    (1..=3).contains(&row) && (2..=5).contains(&col),
+                    "row={row} col={col}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rectangle_corners_normalize_any_gesture_direction() {
+        for (anchor, cursor) in [
+            ((1, 2), (3, 5)),
+            ((3, 5), (1, 2)),
+            ((1, 5), (3, 2)),
+            ((3, 2), (1, 5)),
+        ] {
+            let selection = Selection::absolute_rectangle((), anchor, cursor);
+            assert_eq!(
+                selection.rectangle_corners(),
+                ((1, 2), (3, 5)),
+                "anchor={anchor:?} cursor={cursor:?}",
+            );
+            assert_eq!(selection.endpoints(), (anchor, cursor));
+        }
+    }
+
+    #[test]
+    fn rectangle_visible_rects_match_cells_when_scrolled() {
+        let inner = Rect::new(10, 5, 8, 6);
+        for (anchor, cursor) in [
+            ((0, 2), (0, 5)),
+            ((1, 6), (4, 2)),
+            ((4, 2), (1, 3)),
+            ((0, 0), (20, 7)),
+            ((20, 3), (22, 3)),
+        ] {
+            let selection = Selection::absolute_rectangle((), anchor, cursor);
+            for top in [0, 2, 5, 20] {
+                let metrics = Some(ScrollMetrics {
+                    offset_from_bottom: 0,
+                    max_offset_from_bottom: top,
+                    viewport_rows: 6,
+                });
+                let rects = selection.visible_rects(inner, metrics);
+                assert!(rects[1].is_empty() && rects[2].is_empty());
+                for row in 0..inner.height {
+                    for col in 0..inner.width {
+                        assert_eq!(
+                            rects[0].contains((inner.x + col, inner.y + row).into()),
+                            selection.contains(row, col, metrics),
+                            "anchor={anchor:?} cursor={cursor:?} top={top} row={row} col={col}",
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn with_rectangle_keeps_endpoints_and_phase() {
+        let mut selection = Selection::absolute_range((), (4, 1), (2, 6));
+        selection.finish();
+        let rectangle = selection.clone().with_rectangle(true);
+        assert!(rectangle.is_rectangle());
+        assert!(rectangle.is_finalized());
+        assert_eq!(rectangle.endpoints(), ((4, 1), (2, 6)));
+        assert!(!rectangle.with_rectangle(false).is_rectangle());
+        assert!(!selection.is_rectangle());
     }
 
     fn make_sel(sr: u32, sc: u16, er: u32, ec: u16) -> Selection {
