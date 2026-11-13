@@ -35,13 +35,18 @@ pub(super) fn launch_cwd_for_terminal(
     >,
     terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
 ) -> Option<PathBuf> {
+    // A pane's shell can stay in a directory that was removed afterwards, such
+    // as a deleted git worktree. Spawning there makes portable-pty silently
+    // start in $HOME, so skip such candidates.
     terminal_runtimes
         .get(terminal_id)
         .and_then(|runtime| runtime.follow_cwd())
+        .filter(|cwd| cwd.is_dir())
         .or_else(|| {
             terminals
                 .get(terminal_id)
                 .map(|terminal| terminal.cwd.clone())
+                .filter(|cwd| cwd.is_dir())
         })
 }
 
@@ -59,14 +64,14 @@ impl App {
         pane_id: crate::layout::PaneId,
     ) -> Option<PathBuf> {
         let workspace = self.state.workspaces.get(ws_idx)?;
-        let tab = workspace
-            .tabs
-            .get(workspace.find_tab_index_for_pane(pane_id)?)?;
-        launch_cwd_for_terminal(
-            tab.terminal_id(pane_id)?,
-            &self.state.terminals,
-            &self.terminal_runtimes,
-        )
+        workspace
+            .find_tab_index_for_pane(pane_id)
+            .and_then(|tab_idx| workspace.tabs.get(tab_idx))
+            .and_then(|tab| tab.terminal_id(pane_id))
+            .and_then(|terminal_id| {
+                launch_cwd_for_terminal(terminal_id, &self.state.terminals, &self.terminal_runtimes)
+            })
+            .or_else(|| Some(workspace.identity_cwd.clone()).filter(|cwd| cwd.is_dir()))
     }
 
     pub(super) fn focused_pane_cwd_in_workspace(&self, ws_idx: usize) -> Option<PathBuf> {
