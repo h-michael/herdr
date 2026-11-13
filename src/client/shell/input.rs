@@ -554,7 +554,18 @@ impl ClientShellState {
                 repetitions,
                 tracked,
             } => {
-                for _ in 0..repetitions {
+                for done in 0..repetitions {
+                    if self.copy_operation_in_flight {
+                        // Hold the remaining repetitions like any key that
+                        // arrives while a copy operation is in flight. The front
+                        // keeps them ahead of input already queued behind them.
+                        self.copy_input_queue.push_front(
+                            key.clone()
+                                .with_kind(KeyEventKind::Repeat)
+                                .with_repeat_count(repetitions - done),
+                        );
+                        break;
+                    }
                     let current = self.input_context();
                     if !self.input_leases.reprocess_allowed(
                         lease_key,
