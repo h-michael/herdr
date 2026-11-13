@@ -580,22 +580,39 @@ impl ClientShellState {
             return;
         };
         let (width, height) = copy_mode.geometry;
-        if col_delta < 0 {
-            copy_mode.cursor.col = copy_mode
-                .cursor
-                .col
-                .saturating_sub(col_delta.unsigned_abs());
-        } else if col_delta > 0 {
-            copy_mode.cursor.col = copy_mode
-                .cursor
-                .col
-                .saturating_add(col_delta as u16)
-                .min(width.saturating_sub(1));
-        }
+        let last_col = width.saturating_sub(1);
         let total_rows = copy_mode
             .max_offset_from_bottom
             .saturating_add(height as usize)
             .max(1);
+        let last_row = total_rows.saturating_sub(1).min(u32::MAX as usize) as u32;
+        // Horizontal moves cross line boundaries like tmux copy-mode-vi: `h` at
+        // column 0 lands on the previous line's last character, and `l` at the
+        // rightmost column continues at column 0 of the next line.
+        let mut wrapped_to_previous_line = false;
+        if col_delta < 0 {
+            if copy_mode.cursor.col == 0 && copy_mode.cursor.row > 0 {
+                copy_mode.cursor.row -= 1;
+                copy_mode.cursor.col = last_col;
+                wrapped_to_previous_line = true;
+            } else {
+                copy_mode.cursor.col = copy_mode
+                    .cursor
+                    .col
+                    .saturating_sub(col_delta.unsigned_abs());
+            }
+        } else if col_delta > 0 {
+            if copy_mode.cursor.col >= last_col && copy_mode.cursor.row < last_row {
+                copy_mode.cursor.row += 1;
+                copy_mode.cursor.col = 0;
+            } else {
+                copy_mode.cursor.col = copy_mode
+                    .cursor
+                    .col
+                    .saturating_add(col_delta as u16)
+                    .min(last_col);
+            }
+        }
         if row_delta < 0 {
             copy_mode.cursor.row = copy_mode
                 .cursor
@@ -606,11 +623,16 @@ impl ClientShellState {
                 .cursor
                 .row
                 .saturating_add(u32::from(row_delta as u16))
-                .min(total_rows.saturating_sub(1).min(u32::MAX as usize) as u32);
+                .min(last_row);
         }
         self.reveal_copy_cursor(outcome, false);
         self.sync_copy_selection();
         outcome.repaint = true;
+        if wrapped_to_previous_line {
+            // The last character is resolved server-side through the same motion
+            // as `$`; until it answers, the cursor sits at the rightmost column.
+            self.request_copy_motion(crate::api::schema::PaneCopyMotion::LineEnd, outcome);
+        }
     }
 
     fn move_copy_page(&mut self, direction: i8, half_page: bool, outcome: &mut ClientShellInput) {
