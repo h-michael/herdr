@@ -25,10 +25,6 @@ fn copy_mode_state(rectangle_supported: bool) -> ClientShellState {
     state
 }
 
-fn point(row: u32, col: u16) -> crate::api::schema::PaneTextPoint {
-    crate::api::schema::PaneTextPoint { row, col }
-}
-
 fn copy_selection(state: &ClientShellState) -> Option<ClientCopySelection> {
     state.copy_mode.as_ref().unwrap().selection
 }
