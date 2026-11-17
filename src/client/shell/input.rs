@@ -736,7 +736,23 @@ impl ClientShellState {
                     ClientShellMode::Terminal
                 };
                 outcome.repaint = true;
-                if self.config.keybinds.matches_prefix(key) {
+                if let Some(prefix) = self.config.keybinds.matching_prefix(key) {
+                    // Re-entering prefix mode below leaves the input context
+                    // unchanged, so held-key repeats of that prefix press are
+                    // reprocessed here; without this they would fall through
+                    // and send a literal prefix.
+                    if key.kind == KeyEventKind::Repeat {
+                        return None;
+                    }
+                    // After a held repeat, the prefix starts prefix mode again
+                    // instead of sending a literal prefix, so typing the
+                    // prefix before every key (`ctrl+s ctrl+l ctrl+s ctrl+l`)
+                    // still works with the modifier held. tmux does the same
+                    // when the prefix arrives during a repeat.
+                    if self.prefix_hold.is_some_and(|hold| hold.repeated) {
+                        self.enter_prefix_mode(prefix);
+                        return None;
+                    }
                     self.prefix_hold = None;
                     self.mode = return_mode;
                     // Mid-sequence the keys so far were meant for Herdr, so the
@@ -805,8 +821,17 @@ impl ClientShellState {
                     }
                     PrefixResolution::Pending(step) => self.pending_prefix_keys.push(step),
                     PrefixResolution::NoMatch => {
+                        let after_repeat = self.prefix_hold.is_some_and(|hold| hold.repeated)
+                            && self.pending_prefix_keys.is_empty();
                         self.prefix_hold = None;
                         self.mode = return_mode;
+                        // Like a key during a tmux repeat: it leaves prefix
+                        // mode and is handled as if no prefix had been
+                        // pressed, so Ctrl+C after a held repeat still reaches
+                        // the pane. Right after the prefix it is discarded.
+                        if after_repeat {
+                            return self.route_key_press(key, outcome);
+                        }
                     }
                 }
                 None
