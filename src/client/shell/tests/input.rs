@@ -1224,6 +1224,106 @@ fn host_without_key_releases_keeps_the_one_shot_prefix() {
 }
 
 #[test]
+fn prefix_after_a_held_repeat_starts_prefix_mode_again() {
+    let mut state = prefix_hold_state(true);
+    let collapsed = state.sidebar_collapsed;
+
+    press(&mut state, KeyCode::Char('s'), KeyModifiers::CONTROL);
+    press(&mut state, KeyCode::Char('b'), KeyModifiers::CONTROL);
+    assert_eq!(state.sidebar_collapsed, !collapsed);
+
+    let prefix = press(&mut state, KeyCode::Char('s'), KeyModifiers::CONTROL);
+    assert!(pane_key_events(&prefix).is_empty());
+    assert_eq!(state.mode, ClientShellMode::Prefix);
+    press(&mut state, KeyCode::Char('b'), KeyModifiers::CONTROL);
+    assert_eq!(state.sidebar_collapsed, collapsed);
+    assert_eq!(state.mode, ClientShellMode::Prefix);
+}
+
+#[test]
+fn prefix_twice_after_a_held_repeat_sends_the_prefix() {
+    let mut state = prefix_hold_state(true);
+
+    press(&mut state, KeyCode::Char('s'), KeyModifiers::CONTROL);
+    press(&mut state, KeyCode::Char('b'), KeyModifiers::CONTROL);
+    press(&mut state, KeyCode::Char('s'), KeyModifiers::CONTROL);
+    let sent = press(&mut state, KeyCode::Char('s'), KeyModifiers::CONTROL);
+    assert_eq!(pane_key_events(&sent).len(), 1);
+    assert_eq!(state.mode, ClientShellMode::Terminal);
+}
+
+#[test]
+fn releasing_after_the_prefix_is_pressed_again_keeps_the_one_shot_prefix() {
+    let mut state = prefix_hold_state(true);
+    let collapsed = state.sidebar_collapsed;
+
+    press(&mut state, KeyCode::Char('s'), KeyModifiers::CONTROL);
+    press(&mut state, KeyCode::Char('b'), KeyModifiers::CONTROL);
+    press(&mut state, KeyCode::Char('s'), KeyModifiers::CONTROL);
+    release_left_control(&mut state);
+    assert_eq!(state.mode, ClientShellMode::Prefix);
+
+    press(&mut state, KeyCode::Char('b'), KeyModifiers::empty());
+    assert_eq!(state.sidebar_collapsed, collapsed);
+    assert_eq!(state.mode, ClientShellMode::Terminal);
+}
+
+#[test]
+fn holding_the_prefix_pressed_again_after_a_repeat_stays_in_prefix_mode() {
+    let mut state = prefix_hold_state(true);
+
+    press(&mut state, KeyCode::Char('s'), KeyModifiers::CONTROL);
+    press(&mut state, KeyCode::Char('b'), KeyModifiers::CONTROL);
+    press(&mut state, KeyCode::Char('s'), KeyModifiers::CONTROL);
+    let held = state.handle_raw_events(vec![RawInputEvent::Key(
+        crate::input::TerminalKey::new(KeyCode::Char('s'), KeyModifiers::CONTROL)
+            .with_kind(crossterm::event::KeyEventKind::Repeat),
+    )]);
+    assert!(pane_key_events(&held).is_empty());
+    assert_eq!(state.mode, ClientShellMode::Prefix);
+}
+
+#[test]
+fn unbound_key_after_a_held_repeat_reaches_the_pane() {
+    let mut state = prefix_hold_state(true);
+    let collapsed = state.sidebar_collapsed;
+
+    press(&mut state, KeyCode::Char('s'), KeyModifiers::CONTROL);
+    press(&mut state, KeyCode::Char('b'), KeyModifiers::CONTROL);
+    assert_eq!(state.sidebar_collapsed, !collapsed);
+
+    let typed = press(&mut state, KeyCode::Char('c'), KeyModifiers::CONTROL);
+    assert_eq!(state.mode, ClientShellMode::Terminal);
+    assert_eq!(pane_key_events(&typed).len(), 1);
+
+    let released = state.handle_raw_events(vec![RawInputEvent::Key(
+        crate::input::TerminalKey::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+            .with_kind(crossterm::event::KeyEventKind::Release),
+    )]);
+    assert_eq!(pane_key_events(&released).len(), 1);
+}
+
+#[test]
+fn unbound_key_right_after_the_prefix_is_still_discarded() {
+    let mut state = prefix_hold_state(true);
+
+    press(&mut state, KeyCode::Char('s'), KeyModifiers::CONTROL);
+    let typed = press(&mut state, KeyCode::Char('c'), KeyModifiers::CONTROL);
+    assert_eq!(state.mode, ClientShellMode::Terminal);
+    assert!(pane_key_events(&typed).is_empty());
+}
+
+#[test]
+fn prefix_twice_before_a_binding_still_sends_the_prefix() {
+    let mut state = prefix_hold_state(true);
+
+    press(&mut state, KeyCode::Char('s'), KeyModifiers::CONTROL);
+    let sent = press(&mut state, KeyCode::Char('s'), KeyModifiers::CONTROL);
+    assert_eq!(pane_key_events(&sent).len(), 1);
+    assert_eq!(state.mode, ClientShellMode::Terminal);
+}
+
+#[test]
 fn mode_switching_binding_ends_the_prefix_hold() {
     let mut state = prefix_hold_state(true);
 
@@ -1574,6 +1674,40 @@ fn held_prefix_modifier_repeats_a_whole_key_sequence() {
     }
 
     let _ = release_left_control(&mut state);
+    assert_eq!(state.mode, ClientShellMode::Terminal);
+}
+
+#[test]
+fn prefix_mid_sequence_after_a_held_repeat_starts_prefix_mode_again() {
+    let mut state = held_sequence_state(r#"zoom = "prefix+ctrl+n ctrl+z""#);
+    let ctrl = KeyModifiers::CONTROL;
+    let _ = press(&mut state, KeyCode::Char('s'), ctrl);
+    let _ = press(&mut state, KeyCode::Char('n'), ctrl);
+    let _ = press(&mut state, KeyCode::Char('z'), ctrl);
+    let _ = press(&mut state, KeyCode::Char('n'), ctrl);
+    assert_eq!(state.pending_prefix_keys.len(), 1);
+
+    let prefix = press(&mut state, KeyCode::Char('s'), ctrl);
+    assert!(pane_key_events(&prefix).is_empty());
+    assert_eq!(state.mode, ClientShellMode::Prefix);
+    assert!(state.pending_prefix_keys.is_empty());
+
+    let _ = press(&mut state, KeyCode::Char('n'), ctrl);
+    let zoom = press(&mut state, KeyCode::Char('z'), ctrl);
+    assert_eq!(zoom.actions.len(), 1);
+}
+
+#[test]
+fn unbound_key_after_a_held_repeat_runs_a_direct_binding() {
+    let mut state = held_sequence_state("toggle_sidebar = \"prefix+ctrl+b\"\nzoom = \"ctrl+g\"");
+    let ctrl = KeyModifiers::CONTROL;
+    let _ = press(&mut state, KeyCode::Char('s'), ctrl);
+    let _ = press(&mut state, KeyCode::Char('b'), ctrl);
+    assert_eq!(state.mode, ClientShellMode::Prefix);
+
+    let zoom = press(&mut state, KeyCode::Char('g'), ctrl);
+    assert_eq!(zoom.actions.len(), 1);
+    assert!(pane_key_events(&zoom).is_empty());
     assert_eq!(state.mode, ClientShellMode::Terminal);
 }
 
