@@ -2612,8 +2612,11 @@ impl HeadlessServer {
                 }) && deferred_tab_id
                     .as_deref()
                     .is_some_and(|tab_id| self.focus_shell_client_on_tab(client_id, tab_id));
-                let geometry_changed =
-                    navigation_changed && self.claim_shell_tab_geometry(client_id, false);
+                // A tab this client already controls may still hold the size from
+                // its last visit, because only the viewed tab follows resizes.
+                let geometry_changed = navigation_changed
+                    && (self.claim_shell_tab_geometry(client_id, false)
+                        || self.resize_shell_tab_if_controller(client_id, false));
                 if navigation_changed {
                     self.reconcile_client_shell_locations();
                     let focus_after = self.shell_focus_target(client_id);
