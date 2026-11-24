@@ -607,6 +607,9 @@ impl HeadlessServer {
                     self.app.accept_current_focus_without_events();
                 } else if api_focus_succeeded {
                     self.focus_all_shell_clients_on_default_target();
+                    // The newly viewed tab may hold the size from its last visit or
+                    // from spawn, because only the viewed tab follows resizes.
+                    self.reapply_controlled_shell_tab_geometry(false);
                 }
                 changed
             }

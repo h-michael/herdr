@@ -1,6 +1,7 @@
 use super::*;
 
 mod event_fairness;
+mod fork;
 mod native_graphics;
 #[path = "pane_move.rs"]
 mod pane_move_tests;
@@ -2482,8 +2483,7 @@ async fn client_shell_tabs_render_accept_input_and_resize_independently() {
     let first_size = server.app.state.workspaces[0].test_runtimes[&first_pane].current_size();
     let singleton_second_size =
         server.app.state.workspaces[0].test_runtimes[&second_pane].current_size();
-    assert_ne!(singleton_second_size, initial_second_size);
-    assert_eq!(singleton_second_size, first_size);
+    assert_eq!(singleton_second_size, initial_second_size);
 
     let (second_control, second_render) = connect_test_shell(&mut server, 22, 70, 20);
     let _ = second_control.recv().expect("second snapshot");
@@ -2547,8 +2547,8 @@ async fn client_shell_tabs_render_accept_input_and_resize_independently() {
     let singleton_first = server.app.state.workspaces[0].test_runtimes[&first_pane].current_size();
     let singleton_second =
         server.app.state.workspaces[0].test_runtimes[&second_pane].current_size();
-    assert_ne!(singleton_first, first_size);
-    assert_eq!(singleton_first, singleton_second);
+    assert_eq!(singleton_first, first_size);
+    assert_eq!(singleton_second, resized_second);
     shutdown_test_runtimes(&mut server);
 }
 

@@ -577,29 +577,18 @@ impl HeadlessServer {
             crate::kitty_graphics::HostCellSize::default()
         };
         let area = Rect::new(0, 0, cols, rows);
-        if self.app_client_count() == 1 {
-            for (workspace_index, workspace) in self.app.state.workspaces.iter().enumerate() {
-                for tab_index in 0..workspace.tabs.len() {
-                    crate::ui::resize_tab_surface(
-                        &self.app.state,
-                        &self.app.terminal_runtimes,
-                        workspace_index,
-                        tab_index,
-                        area,
-                        cell_size,
-                    );
-                }
-            }
-        } else {
-            crate::ui::compute_tab_surface_for(
-                &self.app.state,
-                &self.app.terminal_runtimes,
-                Some(target),
-                area,
-                true,
-                cell_size,
-            );
-        }
+        // Only the viewed tab is resized, even with a single client. Resizing
+        // every tab sends SIGWINCH to every pane in the session, so a sidebar
+        // toggle made every agent redraw. Background tabs take the client's
+        // geometry when navigation shows them again.
+        crate::ui::compute_tab_surface_for(
+            &self.app.state,
+            &self.app.terminal_runtimes,
+            Some(target),
+            area,
+            true,
+            cell_size,
+        );
         if self
             .popup_owner_tab_id
             .as_deref()
